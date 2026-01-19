@@ -25,6 +25,33 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller auto-py-to-exe customtkinter packaging paho-mqtt Pillow requests pdf2image
 
+    # NEU: Poppler herunterladen und bereitstellen
+    - name: Download and Setup Poppler
+      shell: powershell
+      run: |
+        # Neueste stabile Poppler Version für Windows herunterladen (angepasst an aktuellen Release)
+        $url = "https://github.com/oschwartz10612/poppler-windows/releases/download/v24.02.0-0/Release-24.02.0-0.zip"
+        $output = "poppler.zip"
+        
+        Write-Host "Downloading Poppler from $url..."
+        Invoke-WebRequest -Uri $url -OutFile $output
+        
+        Write-Host "Extracting Poppler..."
+        Expand-Archive -Path $output -DestinationPath "poppler_temp"
+        
+        # Verschiebe den Library-Ordner (enthält bin, lib, include) nach 'poppler' im Root
+        # Die Struktur im Zip ist meist Release-X.X.X-0/Library
+        $extractedRoot = Get-ChildItem -Path "poppler_temp" | Select-Object -First 1
+        $libraryPath = Join-Path $extractedRoot.FullName "Library"
+        
+        if (Test-Path $libraryPath) {
+            Move-Item -Path $libraryPath -Destination "poppler"
+            Write-Host "Poppler setup complete."
+        } else {
+            Write-Error "Could not find Library folder in extracted poppler archive."
+            exit 1
+        }
+
     # 1. Programm zur EXE kompilieren
     - name: Build EXE with PyInstaller
       run: |
@@ -35,6 +62,7 @@ jobs:
       run: choco install innosetup --no-progress
 
     # 3. Installer-Skript erstellen
+    # FIX: Encoding auf UTF8 gesetzt, damit Umlaute (ä, ö, ü) im Installer korrekt sind
     - name: Generate Inno Setup Script
       shell: powershell
       run: |
@@ -69,7 +97,8 @@ jobs:
         Filename: "{app}\TicketPrinter.exe"; Description: "Programm starten"; Flags: nowait postinstall skipifsilent
         "@
         
-        $issContent | Out-File "setup_script.iss" -Encoding ASCII
+        # WICHTIG: UTF8 Encoding für korrekte Umlaute im Wizard
+        $issContent | Out-File "setup_script.iss" -Encoding UTF8
 
     # 4. Installer bauen
     - name: Compile Installer
