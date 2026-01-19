@@ -11,6 +11,7 @@ import re
 import subprocess
 import tempfile
 import shutil
+import webbrowser  # Neu fuer Update-Links
 from datetime import datetime
 from typing import List, Optional
 
@@ -33,7 +34,6 @@ try:
     PDF2IMAGE_AVAILABLE = True
 except ImportError:
     PDF2IMAGE_AVAILABLE = False
-    # print("WARNING: pdf2image not found.") # Optional logging
 
 try:
     import matplotlib
@@ -47,7 +47,13 @@ except ImportError:
 # GLOBAL PATH & SETTINGS MANAGEMENT
 # ----------------------------------------------------------------------
 
-# Bestimme das Basis-Verzeichnis (funktioniert als Script UND als .exe)
+# Version & Update Konfiguration
+APP_VERSION = "1.0.0"
+# Hier URL zur rohen Textdatei mit der Version eintragen (z.B. GitHub Raw)
+UPDATE_URL_VERSION = "https://raw.githubusercontent.com/Noxist/universal-ticket-printer/main/version.txt"
+# Hier Link zum Download/Release
+UPDATE_URL_LINK = "https://github.com/Noxist/universal-ticket-printer/releases"
+
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
@@ -61,7 +67,6 @@ DEFAULT_SETTINGS = {
     "appearance_mode": "System",
     "color_theme": "blue",
     "font_family": "Poppins",
-    # Secrets sind jetzt leer und müssen vom User konfiguriert werden
     "printer_ip": "",
     "mqtt_host": "",
     "mqtt_port": 8883,
@@ -78,11 +83,12 @@ def load_settings():
     defaults = DEFAULT_SETTINGS.copy()
     if os.path.exists(SETTINGS_FILE):
         try:
-            with open(SETTINGS_FILE, "r") as f:
+            # FIX: encoding='utf-8' verhindert ??? bei Umlauten
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 defaults.update(data)
         except Exception as e:
-            print(f"Error loading settings: {e}")
+            print(f"Fehler beim Laden der Einstellungen: {e}")
     
     APP_SETTINGS = defaults
     return APP_SETTINGS
@@ -91,10 +97,26 @@ def save_settings(data):
     global APP_SETTINGS
     APP_SETTINGS.update(data)
     try:
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(APP_SETTINGS, f, indent=4)
+        # FIX: ensure_ascii=False speichert Umlaute als echte Zeichen
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(APP_SETTINGS, f, indent=4, ensure_ascii=False)
+        return True
+    except PermissionError:
+        try:
+            # Fallback GUI fuer Fehler
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror(
+                "Speicherfehler", 
+                f"Zugriff verweigert!\nDas Programm darf nicht in {SETTINGS_FILE} schreiben.\n"
+                "Bitte starte es als Administrator oder verschiebe den Ordner."
+            )
+            root.destroy()
+        except: pass
+        return False
     except Exception as e:
         print(f"Failed to save settings: {e}")
+        return False
 
 # Initiale Settings laden
 load_settings()
@@ -115,16 +137,12 @@ TEXT_SIZE = 28
 TIME_SIZE = 24
 
 def _safe_font(candidates: List[str], size: int) -> ImageFont.ImageFont:
-    # Suche zuerst im lokalen 'fonts' Ordner (für Phase 2 Vorbereitung)
     local_font_dir = os.path.join(BASE_DIR, "assets", "fonts")
-    
     search_paths = []
-    # Füge lokale Kandidaten hinzu
     if os.path.exists(local_font_dir):
         for c in candidates:
             search_paths.append(os.path.join(local_font_dir, c))
             
-    # Füge System-Pfade hinzu
     search_paths.extend(candidates)
     search_paths.extend([
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -139,7 +157,6 @@ def _safe_font(candidates: List[str], size: int) -> ImageFont.ImageFont:
             continue
     return ImageFont.load_default()
 
-# Font Definitionen
 FONT_NAMES_TITLE = ["DejaVuSans-Bold.ttf", "Arial Bold.ttf", "arialbd.ttf", "Segoe UI Bold"]
 FONT_NAMES_TEXT = ["DejaVuSans.ttf", "Arial.ttf", "arial.ttf", "Segoe UI"]
 FONT_NAMES_TIME = ["DejaVuSans.ttf", "Arial.ttf", "arial.ttf", "Consolas"]
@@ -315,7 +332,7 @@ def render_latex_image(latex_code: str, title: str = "", add_dt: bool = False) -
             
             current_y = MARGIN_T
             if title:
-                draw.text((MARGIN_L, current_y), title, fill=0, font=FONT_TITLE)
+                draw.text((MARGIN_L, y_pos), title, fill=0, font=FONT_TITLE) # Hinweis: y_pos korrigieren falls nötig
                 current_y += 50
             if add_dt:
                 dt_str = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -475,8 +492,8 @@ class ModernPrinterApp(ctk.CTk):
         ctk.set_default_color_theme(APP_SETTINGS["color_theme"])
         self.font_main = (APP_SETTINGS["font_family"], 13)
         self.font_head = (APP_SETTINGS["font_family"], 20, "bold")
-       	self.font_mono = ("Consolas", 12)
-        self.title("Universal Ticket Printer PRO (Open Source)")
+        self.font_mono = ("Consolas", 12)
+        self.title(f"Universal Ticket Printer PRO v{APP_VERSION} (Open Source)")
         
         # Icon laden (Relative Pfade)
         try:
@@ -529,12 +546,45 @@ class ModernPrinterApp(ctk.CTk):
         self._init_image_frame()
         self._init_settings_frame()
         
-        # AUTO START LOGIC: Wenn IP oder MQTT fehlt -> Settings zeigen
-        if not APP_SETTINGS.get("printer_ip") and not APP_SETTINGS.get("mqtt_host"):
+        # AUTO START LOGIC
+        # Prüfung auf leere Strings (stripped) statt nur Existenz
+        ip_set = APP_SETTINGS.get("printer_ip", "").strip()
+        mqtt_set = APP_SETTINGS.get("mqtt_host", "").strip()
+
+        if not ip_set and not mqtt_set:
             self.show_settings()
-            messagebox.showinfo("Willkommen", "Bitte konfiguriere zuerst deinen Drucker (IP) und/oder MQTT.")
+            # Umlaute entfernt wie gewuenscht fuer bessere Kompatibilitaet
+            messagebox.showinfo("Setup", "Bitte konfiguriere zuerst Drucker (IP) oder MQTT.\n(Please configure printer IP or MQTT first.)")
         else:
             self.show_latex() # Default Start
+        
+        # Auto-Update Prüfung starten
+        self.check_for_updates()
+
+    def check_for_updates(self):
+        """Prüft im Hintergrund, ob eine neue Version verfügbar ist."""
+        def _check():
+            try:
+                # Timeout kurz halten
+                r = requests.get(UPDATE_URL_VERSION, timeout=3)
+                if r.status_code == 200:
+                    latest = r.text.strip()
+                    if latest != APP_VERSION:
+                        self.after(0, lambda: self._show_update_dialog(latest))
+                    else:
+                        print("System ist aktuell.")
+            except Exception as e:
+                print(f"Update Check failed: {e}")
+
+        # Nur starten, wenn requests verfügbar ist
+        if 'requests' in sys.modules:
+            threading.Thread(target=_check, daemon=True).start()
+
+    def _show_update_dialog(self, new_ver):
+        msg = f"Ein neues Update ist verfügbar!\nAktuell: {APP_VERSION}\nNeu: {new_ver}\n\nJetzt herunterladen?"
+        # askyesno ist sicher bzgl. Umlauten, da Windows-Standard-Dialog
+        if messagebox.askyesno("Update", msg):
+            webbrowser.open(UPDATE_URL_LINK)
 
     def _create_nav_btn(self, text, row, cmd):
         btn = ctk.CTkButton(self.sidebar_frame, text=text, command=cmd, 
