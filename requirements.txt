@@ -1,0 +1,6 @@
+customtkinter
+Pillow
+requests
+packaging
+paho-mqtt
+matplotlib

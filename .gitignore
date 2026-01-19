@@ -1,0 +1,16 @@
+# Python System Dateien
+__pycache__/
+*.py[cod]
+venv/
+.env
+
+# Deine privaten Einstellungen (WICHTIG!)
+printer_settings.json
+
+# Build Ordner (entstehen später bei der EXE Erstellung)
+build/
+dist/
+*.spec
+
+# Logs
+*.log
