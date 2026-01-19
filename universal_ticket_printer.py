@@ -27,13 +27,13 @@ try:
     import requests
 except ImportError:
     ctk = None 
-    print("CRITICAL: Missing libraries. Run: pip install customtkinter Pillow requests packaging paho-mqtt")
+    print("CRITICAL: Missing libraries. Run: pip install customtkinter Pillow requests packaging paho-mqtt pdf2image")
 
 # ----------------------------------------------------------------------
 # GLOBAL PATH & SETTINGS MANAGEMENT
 # ----------------------------------------------------------------------
 
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 UPDATE_URL_VERSION = "https://raw.githubusercontent.com/noxist/universal-ticket-printer/main/version.txt"
 UPDATE_URL_LINK = "https://github.com/noxist/universal-ticket-printer/releases"
 
@@ -70,7 +70,7 @@ def load_settings():
                 data = json.load(f)
                 defaults.update(data)
         except Exception as e:
-            print(f"Fehler beim Laden der Einstellungen: {e}")
+            print(f"Error loading settings: {e}")
     
     APP_SETTINGS = defaults
     return APP_SETTINGS
@@ -87,9 +87,9 @@ def save_settings(data):
             root = tk.Tk()
             root.withdraw()
             messagebox.showerror(
-                "Speicherfehler", 
-                f"Zugriff verweigert!\nDas Programm darf nicht in {SETTINGS_FILE} schreiben.\n"
-                "Bitte starte es als Administrator oder verschiebe den Ordner."
+                "Save Error", 
+                f"Access denied!\nThe program cannot write to {SETTINGS_FILE}.\n"
+                "Please run as administrator or move the folder."
             )
             root.destroy()
         except: pass
@@ -223,14 +223,17 @@ def render_receipt_image(title: str, body_lines: List[str], add_dt: bool = True)
 # LATEX ENGINE
 # ----------------------------------------------------------------------
 def _check_pdflatex():
-    # Auch hier Fenster unterdruecken beim Check
+    # Robustly suppress window
     try:
         startupinfo = None
         creationflags = 0
         if os.name == 'nt':
             creationflags = subprocess.CREATE_NO_WINDOW
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
         
-        subprocess.run(["pdflatex", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
+        subprocess.run(["pdflatex", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags, startupinfo=startupinfo)
         return True
     except:
         return shutil.which("pdflatex") is not None
@@ -239,7 +242,7 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
     try:
         from pdf2image import convert_from_path
     except ImportError:
-        raise RuntimeError("pdf2image Library fehlt.")
+        raise RuntimeError("pdf2image library is missing.")
 
     is_full_doc = "\\begin{document}" in latex_code or "\\section" in latex_code
     content = latex_code
@@ -247,6 +250,7 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
         if not ("\\begin{tikzpicture}" in content or "$$" in content or "\\[" in content):
              content = f"\\[ {content} \\]"
     
+    # Extended Template with more libraries (circuitikz, chemfig, etc.)
     tex_template = r"""
 \documentclass[11pt]{article}
 \usepackage[utf8]{inputenc}
@@ -259,7 +263,15 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
 \usepackage{enumitem}
 \usepackage{geometry}
 \usepackage{tikz}          
-\usepackage{pgfplots}      
+\usepackage{pgfplots}
+\usepackage{circuitikz}  % For circuits
+\usepackage{chemfig}     % For chemistry
+\usepackage{listings}    % For code blocks
+\usepackage{xcolor}      % For colors
+\usepackage{booktabs}    % For nice tables
+\usepackage{tabularx}    % For flexible tables
+\usepackage{eurosym}     % Euro symbol
+\usetikzlibrary{patterns,decorations.pathmorphing,decorations.markings,calc}
 \pgfplotsset{compat=1.18}
 \geometry{paperwidth=80mm, paperheight=2000mm, left=2mm, right=2mm, top=2mm, bottom=2mm}
 \renewcommand{\familydefault}{\sfdefault}
@@ -279,33 +291,39 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
             f.write(tex_template)
             
         try:
-            # FIX: Unterdrueckung des schwarzen Fensters
+            # FIX: Robustly suppress black window on Windows
             creationflags = 0
+            startupinfo = None
             if os.name == 'nt':
                 creationflags = subprocess.CREATE_NO_WINDOW
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
             
             cmd = ["pdflatex", "-interaction=nonstopmode", "ticket.tex"]
-            subprocess.run(cmd, cwd=temp_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=creationflags)
+            subprocess.run(cmd, cwd=temp_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=creationflags, startupinfo=startupinfo)
         except subprocess.CalledProcessError:
-            log_content = "Kein Log gefunden."
+            log_content = "No log found."
             try:
                 log_path = os.path.join(temp_dir, "ticket.log")
                 if os.path.exists(log_path):
                     with open(log_path, "r", encoding="utf-8", errors="ignore") as log:
                         log_content = log.read()
             except: pass
-            raise RuntimeError(f"LaTeX Fehler. Prüfe die Syntax.\n{log_content[-300:]}")
+            raise RuntimeError(f"LaTeX Error. Check syntax.\n{log_content[-500:]}")
         except FileNotFoundError:
-             raise RuntimeError("LaTeX (pdflatex) nicht gefunden. Bitte installiere MiKTeX.")
+             raise RuntimeError("LaTeX (pdflatex) not found. Please install MiKTeX or TeX Live.")
 
         poppler_path = None
         local_poppler = os.path.join(BASE_DIR, "poppler", "bin")
         if os.path.exists(local_poppler):
             poppler_path = local_poppler
         
+        # Note: pdf2image might still spawn a window if not handled by library defaults, 
+        # but modern versions with poppler_path usually work fine.
         images = convert_from_path(pdf_file, dpi=203, grayscale=True, poppler_path=poppler_path)
         if not images:
-            raise RuntimeError("PDF konnte nicht in Bild gewandelt werden.")
+            raise RuntimeError("Could not convert PDF to image.")
         
         img = _trim_whitespace(images[0])
         return img
@@ -314,7 +332,7 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 def render_latex_image(latex_code: str, title: str = "", add_dt: bool = False) -> Image.Image:
-    # Check auf Libraries ohne Import (schnell)
+    # Check for libraries (quick check)
     has_pdf2image = importlib.util.find_spec("pdf2image") is not None
     has_pdflatex = _check_pdflatex()
 
@@ -352,19 +370,18 @@ def render_latex_image(latex_code: str, title: str = "", add_dt: bool = False) -
             
         except Exception as e:
             print(f"Latex Error: {e}")
-            return render_receipt_image("LaTeX Fehler", [str(e)[:300]], False)
+            return render_receipt_image("LaTeX Error", [str(e)[:300]], False)
 
-    # Fallback: Matplotlib (wird hier lazy geladen)
+    # Fallback: Matplotlib (lazy load)
     return render_matplotlib_fallback(latex_code, title, add_dt)
 
 def render_matplotlib_fallback(latex_code: str, title: str, add_dt: bool) -> Image.Image:
-    # LAZY IMPORT: Matplotlib ist langsam, daher nur importieren wenn nötig
     try:
         import matplotlib
         import matplotlib.pyplot as plt
         matplotlib.use('Agg')
     except ImportError:
-        return render_receipt_image("Fehler", ["Keine LaTeX Engine & kein Matplotlib gefunden."], False)
+        return render_receipt_image("Error", ["No LaTeX Engine & no Matplotlib found."], False)
 
     clean_code = latex_code.replace("$$", "$")
     clean_code = re.sub(r"\\section\*?\{.*?\}", "\n--- SECTION ---\n", clean_code)
@@ -527,11 +544,11 @@ class ModernPrinterApp(ctk.CTk):
         self.btn_bulk = self._create_nav_btn("Bulk Print", 1, self.show_bulk)
         self.btn_tpl = self._create_nav_btn("Template", 2, self.show_template)
         self.btn_raw = self._create_nav_btn("Raw Text", 3, self.show_raw)
-        self.btn_latex = self._create_nav_btn("LaTeX / Mathe", 4, self.show_latex)
+        self.btn_latex = self._create_nav_btn("LaTeX / Math", 4, self.show_latex)
         self.btn_imgs = self._create_nav_btn("Images", 5, self.show_images)
         self.btn_settings = self._create_nav_btn("Settings", 6, self.show_settings)
         
-        self.btn_sidebar_cut = ctk.CTkButton(self.sidebar_frame, text="✂ Papier schneiden", 
+        self.btn_sidebar_cut = ctk.CTkButton(self.sidebar_frame, text="✂ Cut Paper", 
                                             command=self.do_manual_cut, fg_color="#d35400", 
                                             hover_color="#e67e22", font=(APP_SETTINGS["font_family"], 13, "bold"))
         self.btn_sidebar_cut.grid(row=7, column=0, padx=20, pady=20, sticky="s")
@@ -547,7 +564,7 @@ class ModernPrinterApp(ctk.CTk):
         self.selected_images = []
         self.frames = {}
         
-        # Frames initialisieren
+        # Frames init
         self._init_bulk_frame()
         self._init_template_frame()
         self._init_raw_frame()
@@ -561,7 +578,7 @@ class ModernPrinterApp(ctk.CTk):
 
         if not ip_set and not mqtt_set:
             self.show_settings()
-            # 1. SETUP WIZARD NACHRICHT MIT MIKTEX HINWEIS
+            # 1. SETUP WIZARD MESSAGE WITH MIKTEX HINT
             self.after(500, self._show_setup_warning) 
         else:
             self.show_latex()
@@ -569,23 +586,21 @@ class ModernPrinterApp(ctk.CTk):
         self.check_for_updates()
 
     def _show_setup_warning(self):
-        # Prüfen ob MiKTeX (pdflatex) fehlt
+        # Check if MiKTeX (pdflatex) is missing
         miktex_msg = ""
         if not _check_pdflatex():
             miktex_msg = (
-                "\n\nACHTUNG: MiKTeX (LaTeX) wurde nicht gefunden!\n"
-                "Damit der Formel-Druck funktioniert, musst du MiKTeX installieren.\n"
+                "\n\nWARNING: MiKTeX (LaTeX) was not found!\n"
+                "To print math/physics formulas, you must install MiKTeX.\n"
                 "Download: https://miktex.org/download"
             )
             
         messagebox.showinfo(
-            "Willkommen", 
-            "Bitte konfiguriere zuerst Drucker (IP) oder MQTT.\n"
-            "(Please configure printer IP or MQTT first.)" + miktex_msg
+            "Welcome", 
+            "Please configure printer IP or MQTT first." + miktex_msg
         )
         if miktex_msg:
-            # Browser öffnen wenn MiKTeX fehlt
-            if messagebox.askyesno("MiKTeX Installieren?", "Moechtest du die MiKTeX Download-Seite jetzt oeffnen?"):
+            if messagebox.askyesno("Install MiKTeX?", "Do you want to open the MiKTeX download page now?"):
                 webbrowser.open("https://miktex.org/download")
 
     def check_for_updates(self):
@@ -603,7 +618,7 @@ class ModernPrinterApp(ctk.CTk):
             threading.Thread(target=_check, daemon=True).start()
 
     def _show_update_dialog(self, new_ver):
-        msg = f"Ein neues Update ist verfuegbar!\nAktuell: {APP_VERSION}\nNeu: {new_ver}\n\nJetzt herunterladen?"
+        msg = f"A new update is available!\nCurrent: {APP_VERSION}\nNew: {new_ver}\n\nDownload now?"
         if messagebox.askyesno("Update", msg):
             webbrowser.open(UPDATE_URL_LINK)
 
@@ -637,11 +652,11 @@ class ModernPrinterApp(ctk.CTk):
                 self._update_status(res)
             except Exception as e:
                 print(e)
-                self._update_status("Fehler aufgetreten.")
+                self._update_status("Error occurred.")
         threading.Thread(target=wrapper, daemon=True).start()
 
     def do_manual_cut(self):
-        self._bg_task(lambda: "Schnitt: OK" if send_manual_cut() else "Schnitt: Fehler")
+        self._bg_task(lambda: "Cut: OK" if send_manual_cut() else "Cut: Error")
 
     def _init_bulk_frame(self):
         f = ctk.CTkFrame(self.main_container, fg_color="transparent")
@@ -651,12 +666,12 @@ class ModernPrinterApp(ctk.CTk):
         self.bulk_txt.pack(fill="both", expand=True, pady=(0, 20))
         opts = ctk.CTkFrame(f, fg_color="transparent")
         opts.pack(fill="x")
-        self.bulk_dt = ctk.CTkSwitch(opts, text="Zeitstempel", onvalue=True, offvalue=False)
+        self.bulk_dt = ctk.CTkSwitch(opts, text="Timestamp", onvalue=True, offvalue=False)
         self.bulk_dt.pack(side="left", padx=(0, 20))
-        self.bulk_cut = ctk.CTkSwitch(opts, text="Papier schneiden", onvalue=True, offvalue=False)
+        self.bulk_cut = ctk.CTkSwitch(opts, text="Cut paper", onvalue=True, offvalue=False)
         self.bulk_cut.select() 
         self.bulk_cut.pack(side="left")
-        ctk.CTkButton(opts, text="Drucken", command=self.do_bulk_print, height=40).pack(side="right")
+        ctk.CTkButton(opts, text="Print", command=self.do_bulk_print, height=40).pack(side="right")
 
     def show_bulk(self):
         self._select_nav(self.btn_bulk)
@@ -679,25 +694,25 @@ class ModernPrinterApp(ctk.CTk):
                 else:
                     img = render_receipt_image(ln.strip(), [""], use_dt)
                 if "OK" in print_master(img, cut=do_cut): count += 1
-            return f"Bulk: {count}/{len(lines)} gedruckt"
+            return f"Bulk: {count}/{len(lines)} printed"
         self._bg_task(task)
 
     def _init_template_frame(self):
         f = ctk.CTkFrame(self.main_container, fg_color="transparent")
         self.frames["tpl"] = f
-        ctk.CTkLabel(f, text="Einzelticket Vorlage", font=self.font_head).pack(anchor="w", pady=(0, 10))
-        self.tpl_title = ctk.CTkEntry(f, placeholder_text="Titel...", height=40, font=self.font_main)
+        ctk.CTkLabel(f, text="Single Ticket Template", font=self.font_head).pack(anchor="w", pady=(0, 10))
+        self.tpl_title = ctk.CTkEntry(f, placeholder_text="Title...", height=40, font=self.font_main)
         self.tpl_title.pack(fill="x", pady=(0, 10))
         self.tpl_body = ctk.CTkTextbox(f, font=self.font_mono, height=120, corner_radius=10)
         self.tpl_body.pack(fill="x", pady=(5, 10))
         opts = ctk.CTkFrame(f, fg_color="transparent")
         opts.pack(fill="x", pady=(0, 10))
-        self.tpl_dt = ctk.CTkSwitch(opts, text="Zeitstempel", onvalue=True, offvalue=False)
+        self.tpl_dt = ctk.CTkSwitch(opts, text="Timestamp", onvalue=True, offvalue=False)
         self.tpl_dt.pack(side="left")
         btn_box = ctk.CTkFrame(f, fg_color="transparent")
         btn_box.pack(fill="x", pady=(0, 10))
-        ctk.CTkButton(btn_box, text="Vorschau", command=self.do_tpl_preview, fg_color="#2980b9").pack(side="left", padx=(0,10))
-        ctk.CTkButton(btn_box, text="Drucken", command=self.do_tpl_print).pack(side="left")
+        ctk.CTkButton(btn_box, text="Preview", command=self.do_tpl_preview, fg_color="#2980b9").pack(side="left", padx=(0,10))
+        ctk.CTkButton(btn_box, text="Print", command=self.do_tpl_print).pack(side="left")
         self.tpl_preview_lbl = ctk.CTkLabel(f, text="", text_color="gray")
         self.tpl_preview_lbl.pack(pady=10)
 
@@ -716,12 +731,12 @@ class ModernPrinterApp(ctk.CTk):
     def _init_raw_frame(self):
         f = ctk.CTkFrame(self.main_container, fg_color="transparent")
         self.frames["raw"] = f
-        ctk.CTkLabel(f, text="Roh-Text Druck", font=self.font_head).pack(anchor="w", pady=(0, 20))
+        ctk.CTkLabel(f, text="Raw Text Print", font=self.font_head).pack(anchor="w", pady=(0, 20))
         self.raw_txt = ctk.CTkTextbox(f, font=self.font_mono, corner_radius=10)
         self.raw_txt.pack(fill="both", expand=True, pady=(0, 10))
-        self.raw_dt = ctk.CTkSwitch(f, text="Zeitstempel", onvalue=True, offvalue=False)
+        self.raw_dt = ctk.CTkSwitch(f, text="Timestamp", onvalue=True, offvalue=False)
         self.raw_dt.pack(pady=(0, 15), anchor="w")
-        ctk.CTkButton(f, text="Text drucken", command=self.do_raw_print, height=45).pack(fill="x")
+        ctk.CTkButton(f, text="Print Text", command=self.do_raw_print, height=45).pack(fill="x")
 
     def show_raw(self):
         self._select_nav(self.btn_raw)
@@ -735,28 +750,28 @@ class ModernPrinterApp(ctk.CTk):
         f = ctk.CTkFrame(self.main_container, fg_color="transparent")
         self.frames["latex"] = f
         ctk.CTkLabel(f, text="LaTeX Professional", font=self.font_head).pack(anchor="w", pady=(0, 10))
-        self.latex_title = ctk.CTkEntry(f, placeholder_text="Titel...", height=35)
+        self.latex_title = ctk.CTkEntry(f, placeholder_text="Title...", height=35)
         self.latex_title.pack(fill="x", pady=(0, 10))
         self.latex_input = ctk.CTkTextbox(f, font=("Consolas", 14), height=150, corner_radius=10)
         self.latex_input.pack(fill="x", pady=(0, 10))
         self.latex_input.insert("1.0", r"\begin{tikzpicture}\draw[fill=black] (0,0) circle (1);\end{tikzpicture}")
         opts = ctk.CTkFrame(f, fg_color="transparent")
         opts.pack(fill="x", pady=(0, 10))
-        self.latex_dt = ctk.CTkSwitch(opts, text="Datum hinzufügen", onvalue=True, offvalue=False)
+        self.latex_dt = ctk.CTkSwitch(opts, text="Add Date", onvalue=True, offvalue=False)
         self.latex_dt.pack(side="left")
         
-        # STATUS PRÜFUNG (ohne Import von matplotlib)
+        # STATUS CHECK
         has_latex = _check_pdflatex()
         has_pdf2image = importlib.util.find_spec("pdf2image") is not None
         
         if not has_latex:
-            status_txt = "⚠️ Fehler: MiKTeX fehlt (Download nötig!)"
+            status_txt = "⚠️ Error: MiKTeX missing (Download required!)"
             color = "red"
         elif not has_pdf2image:
-            status_txt = "⚠️ Fehler: Library fehlt"
+            status_txt = "⚠️ Error: Library missing"
             color = "orange"
         else:
-            status_txt = "✅ LaTeX Engine Bereit"
+            status_txt = "✅ LaTeX Engine Ready"
             color = "gray"
 
         self.lbl_tools = ctk.CTkLabel(opts, text=status_txt, text_color=color)
@@ -764,11 +779,11 @@ class ModernPrinterApp(ctk.CTk):
         
         btn_row = ctk.CTkFrame(f, fg_color="transparent")
         btn_row.pack(fill="x", pady=(0,10))
-        ctk.CTkButton(btn_row, text="Vorschau", command=self.do_latex_preview, fg_color="#2980b9", width=150).pack(side="left", padx=(0,10))
-        ctk.CTkButton(btn_row, text="Drucken", command=self.do_latex_print, fg_color="#8e44ad", width=150).pack(side="left")
+        ctk.CTkButton(btn_row, text="Preview", command=self.do_latex_preview, fg_color="#2980b9", width=150).pack(side="left", padx=(0,10))
+        ctk.CTkButton(btn_row, text="Print", command=self.do_latex_print, fg_color="#8e44ad", width=150).pack(side="left")
         self.scroll_preview = ctk.CTkScrollableFrame(f, fg_color=("white", "gray15"), height=250)
         self.scroll_preview.pack(fill="both", expand=True)
-        self.lbl_latex_preview = ctk.CTkLabel(self.scroll_preview, text="Vorschau hier...", text_color="gray")
+        self.lbl_latex_preview = ctk.CTkLabel(self.scroll_preview, text="Preview here...", text_color="gray")
         self.lbl_latex_preview.pack(pady=20, padx=20)
 
     def show_latex(self):
@@ -776,13 +791,13 @@ class ModernPrinterApp(ctk.CTk):
         self._switch_frame("latex")
 
     def do_latex_preview(self):
-        self.lbl_latex_preview.configure(image=None, text="Rendert...")
+        self.lbl_latex_preview.configure(image=None, text="Rendering...")
         self.update()
         try:
             img = render_latex_image(self.latex_input.get("1.0", "end").strip(), self.latex_title.get(), self.latex_dt.get())
             self.display_preview(img, self.lbl_latex_preview)
         except Exception as e:
-            self.lbl_latex_preview.configure(text=f"Fehler: {e}")
+            self.lbl_latex_preview.configure(text=f"Error: {e}")
 
     def do_latex_print(self):
         code, title, dt = self.latex_input.get("1.0", "end").strip(), self.latex_title.get(), self.latex_dt.get()
@@ -802,19 +817,19 @@ class ModernPrinterApp(ctk.CTk):
         self.frames["imgs"] = f
         header = ctk.CTkFrame(f, fg_color="transparent")
         header.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(header, text="Bilder Batch", font=self.font_head).pack(side="left")
-        ctk.CTkButton(header, text="+ Hinzufügen", width=100, command=self.add_images).pack(side="right")
-        ctk.CTkButton(header, text="Leeren", width=80, fg_color="firebrick", command=self.clear_images).pack(side="right", padx=10)
+        ctk.CTkLabel(header, text="Image Batch", font=self.font_head).pack(side="left")
+        ctk.CTkButton(header, text="+ Add", width=100, command=self.add_images).pack(side="right")
+        ctk.CTkButton(header, text="Clear", width=80, fg_color="firebrick", command=self.clear_images).pack(side="right", padx=10)
         self.scroll_imgs = ctk.CTkScrollableFrame(f, corner_radius=15, fg_color=("gray95", "gray15"))
         self.scroll_imgs.pack(fill="both", expand=True, pady=(0, 20))
-        ctk.CTkButton(f, text="Alle Bilder drucken", command=self.do_img_print, height=45).pack(fill="x")
+        ctk.CTkButton(f, text="Print All Images", command=self.do_img_print, height=45).pack(fill="x")
 
     def show_images(self):
         self._select_nav(self.btn_imgs)
         self._switch_frame("imgs")
 
     def add_images(self):
-        paths = filedialog.askopenfilenames(filetypes=[("Bilder", "*.png;*.jpg;*.jpeg")])
+        paths = filedialog.askopenfilenames(filetypes=[("Images", "*.png;*.jpg;*.jpeg")])
         if paths:
             self.selected_images.extend([p for p in paths if p not in self.selected_images])
             self._redraw_thumbs()
@@ -834,7 +849,7 @@ class ModernPrinterApp(ctk.CTk):
                 card = ctk.CTkFrame(self.scroll_imgs, corner_radius=10)
                 card.grid(row=r, column=c, padx=10, pady=10)
                 ctk.CTkLabel(card, text="", image=ctk_img).pack(padx=10, pady=10)
-                ctk.CTkButton(card, text="Löschen", fg_color="#c0392b", height=20, command=lambda p=path: (self.selected_images.remove(p), self._redraw_thumbs())).pack(pady=5)
+                ctk.CTkButton(card, text="Delete", fg_color="#c0392b", height=20, command=lambda p=path: (self.selected_images.remove(p), self._redraw_thumbs())).pack(pady=5)
                 c += 1
                 if c >= 3: c, r = 0, r + 1
             except: pass
@@ -847,7 +862,7 @@ class ModernPrinterApp(ctk.CTk):
                 try:
                     if "OK" in print_master(render_composed_image(Image.open(p)), True): count += 1
                 except: pass
-            return f"{count} Bilder gedruckt"
+            return f"{count} images printed"
         self._bg_task(task)
 
     def _init_settings_frame(self):
@@ -858,23 +873,23 @@ class ModernPrinterApp(ctk.CTk):
         scroll = ctk.CTkScrollableFrame(f, fg_color="transparent")
         scroll.pack(fill="both", expand=True)
 
-        ctk.CTkLabel(scroll, text="Grundeinstellungen", font=self.font_head).pack(anchor="w", pady=(0, 10))
+        ctk.CTkLabel(scroll, text="Basic Settings", font=self.font_head).pack(anchor="w", pady=(0, 10))
         
         # UI Settings
         b1 = ctk.CTkFrame(scroll, corner_radius=10)
         b1.pack(fill="x", pady=5, ipady=5)
-        ctk.CTkLabel(b1, text="Trennzeichen (Bulk):", font=("Arial", 12, "bold")).pack(anchor="w", padx=15, pady=5)
+        ctk.CTkLabel(b1, text="Delimiter (Bulk):", font=("Arial", 12, "bold")).pack(anchor="w", padx=15, pady=5)
         self.entry_delim = ctk.CTkEntry(b1)
         self.entry_delim.insert(0, APP_SETTINGS.get("bulk_delimiter", "::"))
         self.entry_delim.pack(fill="x", padx=15, pady=(0, 10))
         
         # Printer Settings (IP)
-        ctk.CTkLabel(scroll, text="Lokaler Drucker (LAN)", font=self.font_head).pack(anchor="w", pady=(20, 10))
+        ctk.CTkLabel(scroll, text="Local Printer (LAN)", font=self.font_head).pack(anchor="w", pady=(20, 10))
         b_prn = ctk.CTkFrame(scroll, corner_radius=10)
         b_prn.pack(fill="x", pady=5, ipady=5)
         
-        ctk.CTkLabel(b_prn, text="Drucker IP-Adresse:", font=("Arial", 12, "bold")).pack(anchor="w", padx=15, pady=5)
-        self.entry_ip = ctk.CTkEntry(b_prn, placeholder_text="z.B. 192.168.1.132")
+        ctk.CTkLabel(b_prn, text="Printer IP Address:", font=("Arial", 12, "bold")).pack(anchor="w", padx=15, pady=5)
+        self.entry_ip = ctk.CTkEntry(b_prn, placeholder_text="e.g. 192.168.1.132")
         self.entry_ip.insert(0, APP_SETTINGS.get("printer_ip", ""))
         self.entry_ip.pack(fill="x", padx=15, pady=(0, 10))
 
@@ -887,8 +902,8 @@ class ModernPrinterApp(ctk.CTk):
         fields = [
             ("Host", "mqtt_host"),
             ("Port", "mqtt_port"),
-            ("Benutzer", "mqtt_user"),
-            ("Passwort", "mqtt_pass"),
+            ("User", "mqtt_user"),
+            ("Password", "mqtt_pass"),
             ("Topic", "mqtt_topic")
         ]
         
@@ -901,7 +916,7 @@ class ModernPrinterApp(ctk.CTk):
             ent.pack(fill="x", padx=15, pady=(0, 5))
             self.mqtt_entries[key] = ent
 
-        ctk.CTkButton(scroll, text="Speichern & Neustarten", command=self.save_all_settings, fg_color="green", height=50).pack(fill="x", pady=30)
+        ctk.CTkButton(scroll, text="Save & Restart", command=self.save_all_settings, fg_color="green", height=50).pack(fill="x", pady=30)
 
     def show_settings(self):
         self._select_nav(self.btn_settings)
@@ -919,7 +934,7 @@ class ModernPrinterApp(ctk.CTk):
         }
         
         save_settings(new_data)
-        messagebox.showinfo("Gespeichert", "Einstellungen gespeichert. Bitte App neustarten, falls sich die Darstellung nicht aktualisiert.")
+        messagebox.showinfo("Saved", "Settings saved. Please restart app if UI doesn't update.")
         global APP_SETTINGS
         APP_SETTINGS.update(new_data)
 

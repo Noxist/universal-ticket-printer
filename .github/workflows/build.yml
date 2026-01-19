@@ -3,14 +3,14 @@ name: Build & Release Setup.exe
 on:
   push:
     tags:
-      - 'v*' # Startet nur, wenn du einen Tag wie v1.0.0 pushst
-  workflow_dispatch: # Erlaubt manuellen Start zum Testen
+      - 'v*' # Starts only when you push a tag like v1.0.0
+  workflow_dispatch: # Allows manual start for testing
 
 jobs:
   build:
     runs-on: windows-latest
     permissions:
-      contents: write # WICHTIG: Erlaubt das Erstellen von Releases
+      contents: write # IMPORTANT: Allows creating releases
 
     steps:
     - uses: actions/checkout@v3
@@ -25,7 +25,7 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller auto-py-to-exe customtkinter packaging paho-mqtt Pillow requests pdf2image
 
-    # ROBUSTERER Poppler Download
+    # ROBUST Poppler Download
     - name: Download Poppler
       shell: powershell
       run: |
@@ -38,7 +38,7 @@ jobs:
         Write-Host "Extracting..."
         Expand-Archive -Path $output -DestinationPath "poppler_extracted"
         
-        # Sucht den 'Library' Ordner, egal wo er im Zip liegt (sicherer)
+        # Finds the 'Library' folder, regardless of where it is in the zip (safer)
         $libPath = Get-ChildItem -Path "poppler_extracted" -Recurse -Directory -Filter "Library" | Select-Object -First 1
         
         if ($libPath) {
@@ -56,7 +56,7 @@ jobs:
     - name: Install Inno Setup
       run: choco install innosetup --no-progress
 
-    # Encoding Fix für Umlaute (äöü)
+    # Encoding Fix for Umlaute and English translation
     - name: Generate Inno Setup Script
       shell: powershell
       run: |
@@ -76,7 +76,7 @@ jobs:
         OutputDir=Output
 
         [Tasks]
-        Name: "desktopicon"; Description: "Erstelle ein Desktop-Icon"; GroupDescription: "Zusätzliche Icons:"; Flags: unchecked
+        Name: "desktopicon"; Description: "Create a desktop icon"; GroupDescription: "Additional icons:"; Flags: unchecked
 
         [Files]
         Source: "dist\TicketPrinter.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -88,10 +88,10 @@ jobs:
         Name: "{autodesktop}\Ticket Printer"; Filename: "{app}\TicketPrinter.exe"; IconFilename: "{app}\assets\Thermal-Printer.ico"; Tasks: desktopicon
 
         [Run]
-        Filename: "{app}\TicketPrinter.exe"; Description: "Programm starten"; Flags: nowait postinstall skipifsilent
+        Filename: "{app}\TicketPrinter.exe"; Description: "Launch program"; Flags: nowait postinstall skipifsilent
         "@
         
-        # Schreibt die Datei explizit als UTF8 mit BOM für Inno Setup
+        # Writes the file explicitly as UTF8 with BOM for Inno Setup
         [System.IO.File]::WriteAllLines("$(Get-Location)\setup_script.iss", $issContent, [System.Text.Encoding]::UTF8)
 
     - name: Compile Installer

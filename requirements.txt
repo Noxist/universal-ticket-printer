@@ -4,3 +4,4 @@ requests
 packaging
 paho-mqtt
 matplotlib
+pdf2image
