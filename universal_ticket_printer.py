@@ -11,7 +11,8 @@ import re
 import subprocess
 import tempfile
 import shutil
-import webbrowser  # Neu fuer Update-Links
+import webbrowser
+import importlib.util  # Neu fuer schnellen Check ohne Import
 from datetime import datetime
 from typing import List, Optional
 
@@ -28,31 +29,13 @@ except ImportError:
     ctk = None 
     print("CRITICAL: Missing libraries. Run: pip install customtkinter Pillow requests packaging paho-mqtt")
 
-# PDF2IMAGE für High-End Rendering
-try:
-    from pdf2image import convert_from_path
-    PDF2IMAGE_AVAILABLE = True
-except ImportError:
-    PDF2IMAGE_AVAILABLE = False
-
-try:
-    import matplotlib
-    import matplotlib.pyplot as plt
-    matplotlib.use('Agg')
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
-
 # ----------------------------------------------------------------------
 # GLOBAL PATH & SETTINGS MANAGEMENT
 # ----------------------------------------------------------------------
 
-# Version & Update Konfiguration
-APP_VERSION = "1.0.0"
-# Hier URL zur rohen Textdatei mit der Version eintragen (z.B. GitHub Raw)
-UPDATE_URL_VERSION = "https://raw.githubusercontent.com/Noxist/universal-ticket-printer/main/version.txt"
-# Hier Link zum Download/Release
-UPDATE_URL_LINK = "https://github.com/Noxist/universal-ticket-printer/releases"
+APP_VERSION = "1.0.1"
+UPDATE_URL_VERSION = "https://raw.githubusercontent.com/noxist/universal-ticket-printer/main/version.txt"
+UPDATE_URL_LINK = "https://github.com/noxist/universal-ticket-printer/releases"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -83,7 +66,6 @@ def load_settings():
     defaults = DEFAULT_SETTINGS.copy()
     if os.path.exists(SETTINGS_FILE):
         try:
-            # FIX: encoding='utf-8' verhindert ??? bei Umlauten
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 defaults.update(data)
@@ -97,13 +79,11 @@ def save_settings(data):
     global APP_SETTINGS
     APP_SETTINGS.update(data)
     try:
-        # FIX: ensure_ascii=False speichert Umlaute als echte Zeichen
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(APP_SETTINGS, f, indent=4, ensure_ascii=False)
         return True
     except PermissionError:
         try:
-            # Fallback GUI fuer Fehler
             root = tk.Tk()
             root.withdraw()
             messagebox.showerror(
@@ -241,12 +221,18 @@ def render_receipt_image(title: str, body_lines: List[str], add_dt: bool = True)
     return img
 
 # ----------------------------------------------------------------------
-# LATEX ENGINE
+# LATEX ENGINE (Optimized Lazy Loading)
 # ----------------------------------------------------------------------
 def _check_pdflatex():
     return shutil.which("pdflatex") is not None
 
 def render_with_pdflatex(latex_code: str) -> Image.Image:
+    # Lazy Import für Speed
+    try:
+        from pdf2image import convert_from_path
+    except ImportError:
+        raise RuntimeError("pdf2image Library fehlt.")
+
     is_full_doc = "\\begin{document}" in latex_code or "\\section" in latex_code
     content = latex_code
     if not is_full_doc:
@@ -296,11 +282,16 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
                         log_content = log.read()
             except: pass
             raise RuntimeError(f"LaTeX Fehler. Prüfe die Syntax.\n{log_content[-300:]}")
+        except FileNotFoundError:
+             raise RuntimeError("LaTeX (pdflatex) nicht gefunden. Bitte installiere MiKTeX.")
 
-        if not PDF2IMAGE_AVAILABLE:
-            raise RuntimeError("pdf2image Library fehlt.")
-            
-        images = convert_from_path(pdf_file, dpi=203, grayscale=True)
+        # --- POPPLER AUTO-DETECT ---
+        poppler_path = None
+        local_poppler = os.path.join(BASE_DIR, "poppler", "bin")
+        if os.path.exists(local_poppler):
+            poppler_path = local_poppler
+        
+        images = convert_from_path(pdf_file, dpi=203, grayscale=True, poppler_path=poppler_path)
         if not images:
             raise RuntimeError("PDF konnte nicht in Bild gewandelt werden.")
         
@@ -311,7 +302,11 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 def render_latex_image(latex_code: str, title: str = "", add_dt: bool = False) -> Image.Image:
-    if PDF2IMAGE_AVAILABLE and _check_pdflatex():
+    # Check auf Libraries ohne Import (schnell)
+    has_pdf2image = importlib.util.find_spec("pdf2image") is not None
+    has_pdflatex = _check_pdflatex()
+
+    if has_pdf2image and has_pdflatex:
         try:
             latex_img = render_with_pdflatex(latex_code)
             w, h = latex_img.size
@@ -332,7 +327,7 @@ def render_latex_image(latex_code: str, title: str = "", add_dt: bool = False) -
             
             current_y = MARGIN_T
             if title:
-                draw.text((MARGIN_L, y_pos), title, fill=0, font=FONT_TITLE) # Hinweis: y_pos korrigieren falls nötig
+                draw.text((MARGIN_L, current_y), title, fill=0, font=FONT_TITLE)
                 current_y += 50
             if add_dt:
                 dt_str = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -347,12 +342,18 @@ def render_latex_image(latex_code: str, title: str = "", add_dt: bool = False) -
             print(f"Latex Error: {e}")
             return render_receipt_image("LaTeX Fehler", [str(e)[:300]], False)
 
-    if MATPLOTLIB_AVAILABLE:
-        return render_matplotlib_fallback(latex_code, title, add_dt)
-    
-    return render_receipt_image("Error", ["Keine LaTeX Engine gefunden."], False)
+    # Fallback: Matplotlib (wird hier lazy geladen)
+    return render_matplotlib_fallback(latex_code, title, add_dt)
 
 def render_matplotlib_fallback(latex_code: str, title: str, add_dt: bool) -> Image.Image:
+    # LAZY IMPORT: Matplotlib ist langsam, daher nur importieren wenn nötig
+    try:
+        import matplotlib
+        import matplotlib.pyplot as plt
+        matplotlib.use('Agg')
+    except ImportError:
+        return render_receipt_image("Fehler", ["Keine LaTeX Engine & kein Matplotlib gefunden."], False)
+
     clean_code = latex_code.replace("$$", "$")
     clean_code = re.sub(r"\\section\*?\{.*?\}", "\n--- SECTION ---\n", clean_code)
     clean_code = re.sub(r"\\begin\{itemize\}", "", clean_code)
@@ -446,11 +447,8 @@ def send_mqtt_image(img: Image.Image, cut: bool = True) -> bool:
         return False
 
 def send_manual_cut() -> bool:
-    # Versuche erst LAN
     if send_lan_image(Image.new("1", (1,1)), cut=True): 
         return True
-        
-    # Versuche MQTT Fallback
     host = APP_SETTINGS.get("mqtt_host", "")
     if not host: return False
 
@@ -495,7 +493,6 @@ class ModernPrinterApp(ctk.CTk):
         self.font_mono = ("Consolas", 12)
         self.title(f"Universal Ticket Printer PRO v{APP_VERSION} (Open Source)")
         
-        # Icon laden (Relative Pfade)
         try:
             if os.path.exists(ICON_FILE):
                 self.iconbitmap(ICON_FILE)
@@ -547,42 +544,54 @@ class ModernPrinterApp(ctk.CTk):
         self._init_settings_frame()
         
         # AUTO START LOGIC
-        # Prüfung auf leere Strings (stripped) statt nur Existenz
         ip_set = APP_SETTINGS.get("printer_ip", "").strip()
         mqtt_set = APP_SETTINGS.get("mqtt_host", "").strip()
 
         if not ip_set and not mqtt_set:
             self.show_settings()
-            # Umlaute entfernt wie gewuenscht fuer bessere Kompatibilitaet
-            messagebox.showinfo("Setup", "Bitte konfiguriere zuerst Drucker (IP) oder MQTT.\n(Please configure printer IP or MQTT first.)")
+            # 1. SETUP WIZARD NACHRICHT MIT MIKTEX HINWEIS
+            self.after(500, self._show_setup_warning) 
         else:
-            self.show_latex() # Default Start
+            self.show_latex()
         
-        # Auto-Update Prüfung starten
         self.check_for_updates()
 
+    def _show_setup_warning(self):
+        # Prüfen ob MiKTeX (pdflatex) fehlt
+        miktex_msg = ""
+        if not _check_pdflatex():
+            miktex_msg = (
+                "\n\nACHTUNG: MiKTeX (LaTeX) wurde nicht gefunden!\n"
+                "Damit der Formel-Druck funktioniert, musst du MiKTeX installieren.\n"
+                "Download: https://miktex.org/download"
+            )
+            
+        messagebox.showinfo(
+            "Willkommen", 
+            "Bitte konfiguriere zuerst Drucker (IP) oder MQTT.\n"
+            "(Please configure printer IP or MQTT first.)" + miktex_msg
+        )
+        if miktex_msg:
+            # Browser öffnen wenn MiKTeX fehlt
+            if messagebox.askyesno("MiKTeX Installieren?", "Moechtest du die MiKTeX Download-Seite jetzt oeffnen?"):
+                webbrowser.open("https://miktex.org/download")
+
     def check_for_updates(self):
-        """Prüft im Hintergrund, ob eine neue Version verfügbar ist."""
         def _check():
             try:
-                # Timeout kurz halten
                 r = requests.get(UPDATE_URL_VERSION, timeout=3)
                 if r.status_code == 200:
                     latest = r.text.strip()
                     if latest != APP_VERSION:
                         self.after(0, lambda: self._show_update_dialog(latest))
-                    else:
-                        print("System ist aktuell.")
             except Exception as e:
                 print(f"Update Check failed: {e}")
 
-        # Nur starten, wenn requests verfügbar ist
         if 'requests' in sys.modules:
             threading.Thread(target=_check, daemon=True).start()
 
     def _show_update_dialog(self, new_ver):
-        msg = f"Ein neues Update ist verfügbar!\nAktuell: {APP_VERSION}\nNeu: {new_ver}\n\nJetzt herunterladen?"
-        # askyesno ist sicher bzgl. Umlauten, da Windows-Standard-Dialog
+        msg = f"Ein neues Update ist verfuegbar!\nAktuell: {APP_VERSION}\nNeu: {new_ver}\n\nJetzt herunterladen?"
         if messagebox.askyesno("Update", msg):
             webbrowser.open(UPDATE_URL_LINK)
 
@@ -723,9 +732,24 @@ class ModernPrinterApp(ctk.CTk):
         opts.pack(fill="x", pady=(0, 10))
         self.latex_dt = ctk.CTkSwitch(opts, text="Datum hinzufügen", onvalue=True, offvalue=False)
         self.latex_dt.pack(side="left")
-        status_txt = "Status: " + ("✅ Bereit" if _check_pdflatex() and PDF2IMAGE_AVAILABLE else "⚠️ MiKTeX/Poppler fehlt")
-        self.lbl_tools = ctk.CTkLabel(opts, text=status_txt, text_color="gray")
+        
+        # STATUS PRÜFUNG (ohne Import von matplotlib)
+        has_latex = _check_pdflatex()
+        has_pdf2image = importlib.util.find_spec("pdf2image") is not None
+        
+        if not has_latex:
+            status_txt = "⚠️ Fehler: MiKTeX fehlt (Download nötig!)"
+            color = "red"
+        elif not has_pdf2image:
+            status_txt = "⚠️ Fehler: Library fehlt"
+            color = "orange"
+        else:
+            status_txt = "✅ LaTeX Engine Bereit"
+            color = "gray"
+
+        self.lbl_tools = ctk.CTkLabel(opts, text=status_txt, text_color=color)
         self.lbl_tools.pack(side="right")
+        
         btn_row = ctk.CTkFrame(f, fg_color="transparent")
         btn_row.pack(fill="x", pady=(0,10))
         ctk.CTkButton(btn_row, text="Vorschau", command=self.do_latex_preview, fg_color="#2980b9", width=150).pack(side="left", padx=(0,10))
@@ -884,7 +908,6 @@ class ModernPrinterApp(ctk.CTk):
         
         save_settings(new_data)
         messagebox.showinfo("Gespeichert", "Einstellungen gespeichert. Bitte App neustarten, falls sich die Darstellung nicht aktualisiert.")
-        # Variable Update
         global APP_SETTINGS
         APP_SETTINGS.update(new_data)
 
