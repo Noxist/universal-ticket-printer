@@ -33,7 +33,7 @@ except ImportError:
 # GLOBAL PATH & SETTINGS MANAGEMENT
 # ----------------------------------------------------------------------
 
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.7"
 UPDATE_URL_VERSION = "https://raw.githubusercontent.com/noxist/universal-ticket-printer/main/version.txt"
 UPDATE_URL_LINK = "https://github.com/noxist/universal-ticket-printer/releases"
 
@@ -131,7 +131,7 @@ def _safe_font(candidates: List[str], size: int) -> ImageFont.ImageFont:
     
     for name in search_paths:
         try:
-            return ImageFont.truetype(name, size)
+            return ImageFont.truetype(name, int(size))
         except Exception:
             continue
     return ImageFont.load_default()
@@ -148,7 +148,7 @@ def _text_len(text: str, font: ImageFont.ImageFont) -> int:
     try:
         return int(font.getlength(text))
     except AttributeError:
-        return font.getbbox(text)[2]
+        return int(font.getbbox(text)[2])
 
 def _wrap(text: str, font: ImageFont.ImageFont, max_px: int) -> List[str]:
     words = (text or "").split()
@@ -180,7 +180,7 @@ def _trim_whitespace(img: Image.Image) -> Image.Image:
     return img
 
 def render_receipt_image(title: str, body_lines: List[str], add_dt: bool = True) -> Image.Image:
-    max_w = PRINT_WIDTH_PX - MARGIN_L - MARGIN_R
+    max_w = int(PRINT_WIDTH_PX - MARGIN_L - MARGIN_R)
     wrapped_title = []
     if title and title.strip():
         wrapped_title = _wrap(title.strip(), FONT_TITLE, max_w)
@@ -202,20 +202,20 @@ def render_receipt_image(title: str, body_lines: List[str], add_dt: bool = True)
     if time_str: h += lh_time
     if wrapped_body: h += len(wrapped_body) * lh_text
     h += MARGIN_B
-    h = max(h, 100)
+    h = max(int(h), 100)
 
-    img = Image.new("L", (PRINT_WIDTH_PX, h), 255)
+    img = Image.new("L", (int(PRINT_WIDTH_PX), int(h)), 255)
     draw = ImageDraw.Draw(img)
     y = MARGIN_T
     for ln in wrapped_title:
-        draw.text((MARGIN_L, y), ln, fill=0, font=FONT_TITLE)
+        draw.text((int(MARGIN_L), int(y)), ln, fill=0, font=FONT_TITLE)
         y += lh_title
     if wrapped_title: y += 10
     if time_str:
-        draw.text((MARGIN_L, y), time_str, fill=0, font=FONT_TIME)
+        draw.text((int(MARGIN_L), int(y)), time_str, fill=0, font=FONT_TIME)
         y += lh_time
     for ln in wrapped_body:
-        draw.text((MARGIN_L, y), ln, fill=0, font=FONT_TEXT)
+        draw.text((int(MARGIN_L), int(y)), ln, fill=0, font=FONT_TEXT)
         y += lh_text
     return img
 
@@ -223,7 +223,6 @@ def render_receipt_image(title: str, body_lines: List[str], add_dt: bool = True)
 # LATEX ENGINE
 # ----------------------------------------------------------------------
 def _check_pdflatex():
-    # Robustly suppress window
     try:
         startupinfo = None
         creationflags = 0
@@ -250,7 +249,6 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
         if not ("\\begin{tikzpicture}" in content or "$$" in content or "\\[" in content):
              content = f"\\[ {content} \\]"
     
-    # Extended Template with more libraries (circuitikz, chemfig, etc.)
     tex_template = r"""
 \documentclass[11pt]{article}
 \usepackage[utf8]{inputenc}
@@ -264,13 +262,13 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
 \usepackage{geometry}
 \usepackage{tikz}          
 \usepackage{pgfplots}
-\usepackage{circuitikz}  % For circuits
-\usepackage{chemfig}     % For chemistry
-\usepackage{listings}    % For code blocks
-\usepackage{xcolor}      % For colors
-\usepackage{booktabs}    % For nice tables
-\usepackage{tabularx}    % For flexible tables
-\usepackage{eurosym}     % Euro symbol
+\usepackage{circuitikz} 
+\usepackage{chemfig}     
+\usepackage{listings}    
+\usepackage{xcolor}      
+\usepackage{booktabs}    
+\usepackage{tabularx}    
+\usepackage{eurosym}     
 \usetikzlibrary{patterns,decorations.pathmorphing,decorations.markings,calc}
 \pgfplotsset{compat=1.18}
 \geometry{paperwidth=80mm, paperheight=2000mm, left=2mm, right=2mm, top=2mm, bottom=2mm}
@@ -291,7 +289,6 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
             f.write(tex_template)
             
         try:
-            # FIX: Robustly suppress black window on Windows
             creationflags = 0
             startupinfo = None
             if os.name == 'nt':
@@ -302,7 +299,7 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
             
             cmd = ["pdflatex", "-interaction=nonstopmode", "ticket.tex"]
             subprocess.run(cmd, cwd=temp_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=creationflags, startupinfo=startupinfo)
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as e:
             log_content = "No log found."
             try:
                 log_path = os.path.join(temp_dir, "ticket.log")
@@ -319,8 +316,6 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
         if os.path.exists(local_poppler):
             poppler_path = local_poppler
         
-        # Note: pdf2image might still spawn a window if not handled by library defaults, 
-        # but modern versions with poppler_path usually work fine.
         images = convert_from_path(pdf_file, dpi=203, grayscale=True, poppler_path=poppler_path)
         if not images:
             raise RuntimeError("Could not convert PDF to image.")
@@ -332,7 +327,6 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 def render_latex_image(latex_code: str, title: str = "", add_dt: bool = False) -> Image.Image:
-    # Check for libraries (quick check)
     has_pdf2image = importlib.util.find_spec("pdf2image") is not None
     has_pdflatex = _check_pdflatex()
 
@@ -340,39 +334,40 @@ def render_latex_image(latex_code: str, title: str = "", add_dt: bool = False) -
         try:
             latex_img = render_with_pdflatex(latex_code)
             w, h = latex_img.size
-            max_w = PRINT_WIDTH_PX - MARGIN_L - MARGIN_R
+            max_w = int(PRINT_WIDTH_PX - MARGIN_L - MARGIN_R)
             
             if w > max_w:
                 ratio = max_w / w
                 new_h = int(h * ratio)
                 latex_img = latex_img.resize((max_w, new_h), Image.Resampling.LANCZOS)
             
-            header_h = MARGIN_T
+            header_h = int(MARGIN_T)
             if title: header_h += 50
             if add_dt: header_h += 30
             
-            final_h = header_h + latex_img.size[1] + MARGIN_B
-            final_img = Image.new("L", (PRINT_WIDTH_PX, final_h), 255)
+            final_h = int(header_h + latex_img.size[1] + MARGIN_B)
+            final_img = Image.new("L", (int(PRINT_WIDTH_PX), final_h), 255)
             draw = ImageDraw.Draw(final_img)
             
-            current_y = MARGIN_T
+            current_y = int(MARGIN_T)
             if title:
-                draw.text((MARGIN_L, current_y), title, fill=0, font=FONT_TITLE)
+                draw.text((int(MARGIN_L), current_y), str(title), fill=0, font=FONT_TITLE)
                 current_y += 50
             if add_dt:
                 dt_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-                draw.text((MARGIN_L, current_y), dt_str, fill=0, font=FONT_TIME)
+                draw.text((int(MARGIN_L), current_y), dt_str, fill=0, font=FONT_TIME)
                 current_y += 30
                 
-            x_pos = (PRINT_WIDTH_PX - latex_img.size[0]) // 2
+            x_pos = int((PRINT_WIDTH_PX - latex_img.size[0]) // 2)
             final_img.paste(latex_img, (x_pos, current_y))
             return final_img
             
         except Exception as e:
             print(f"Latex Error: {e}")
+            import traceback
+            traceback.print_exc()
             return render_receipt_image("LaTeX Error", [str(e)[:300]], False)
 
-    # Fallback: Matplotlib (lazy load)
     return render_matplotlib_fallback(latex_code, title, add_dt)
 
 def render_matplotlib_fallback(latex_code: str, title: str, add_dt: bool) -> Image.Image:
@@ -408,7 +403,7 @@ def render_composed_image(source_img: Image.Image) -> Image.Image:
     if w != PRINT_WIDTH_PX:
         ratio = PRINT_WIDTH_PX / w
         new_h = int(h * ratio)
-        source_img = source_img.resize((PRINT_WIDTH_PX, new_h), Image.Resampling.LANCZOS)
+        source_img = source_img.resize((int(PRINT_WIDTH_PX), new_h), Image.Resampling.LANCZOS)
     return _apply_dither(source_img)
 
 def pil_to_escpos_raster(img: Image.Image) -> bytes:
@@ -578,7 +573,6 @@ class ModernPrinterApp(ctk.CTk):
 
         if not ip_set and not mqtt_set:
             self.show_settings()
-            # 1. SETUP WIZARD MESSAGE WITH MIKTEX HINT
             self.after(500, self._show_setup_warning) 
         else:
             self.show_latex()
@@ -586,7 +580,6 @@ class ModernPrinterApp(ctk.CTk):
         self.check_for_updates()
 
     def _show_setup_warning(self):
-        # Check if MiKTeX (pdflatex) is missing
         miktex_msg = ""
         if not _check_pdflatex():
             miktex_msg = (
