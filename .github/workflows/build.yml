@@ -19,16 +19,17 @@ jobs:
     - name: Install Dependencies
       run: |
         pip install -r requirements.txt
-        pip install pyinstaller
+        pip install pyinstaller auto-py-to-exe customtkinter packaging paho-mqtt Pillow requests pdf2image
 
     # 1. Programm zur EXE kompilieren
+    # Wir fügen --collect-all customtkinter hinzu, damit das Design sicher dabei ist
     - name: Build EXE with PyInstaller
       run: |
-        pyinstaller --noconsole --onefile --name "TicketPrinter" --icon "assets/Thermal-Printer.ico" universal_ticket_printer.py
+        pyinstaller --noconsole --onefile --name "TicketPrinter" --icon "assets/Thermal-Printer.ico" --collect-all customtkinter universal_ticket_printer.py
 
-    # 2. Inno Setup installieren (Das Tool für den Installer)
-    - name: Setup Inno Setup
-      uses: Minionguyjosh/setup-inno-setup@v1.2.0
+    # 2. Inno Setup installieren (Fix: Wir nutzen jetzt Chocolatey statt der kaputten Action)
+    - name: Install Inno Setup
+      run: choco install innosetup --no-progress
 
     # 3. Automatisch die Installer-Konfiguration (.iss) erstellen
     - name: Generate Inno Setup Script
@@ -66,9 +67,9 @@ jobs:
         
         $issContent | Out-File "setup_script.iss" -Encoding ASCII
 
-    # 4. Den Installer bauen
+    # 4. Den Installer bauen (Mit absolutem Pfad, da choco den Pfad evtl. nicht sofort aktualisiert)
     - name: Compile Installer
-      run: iscc setup_script.iss
+      run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup_script.iss'
 
     # 5. Das Ergebnis auf GitHub hochladen
     - name: Upload Installer
