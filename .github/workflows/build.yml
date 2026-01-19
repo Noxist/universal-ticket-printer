@@ -1,13 +1,17 @@
-name: Build Setup.exe
+name: Build & Release Setup.exe
+
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch:
+    tags:
+      - 'v*' # Startet nur, wenn du einen Tag wie v1.0.0 pushst
+  workflow_dispatch: # Erlaubt manuellen Start zum Testen
 
 jobs:
   build:
     runs-on: windows-latest
-    
+    permissions:
+      contents: write # WICHTIG: Erlaubt das Erstellen von Releases
+
     steps:
     - uses: actions/checkout@v3
 
@@ -22,39 +26,39 @@ jobs:
         pip install pyinstaller auto-py-to-exe customtkinter packaging paho-mqtt Pillow requests pdf2image
 
     # 1. Programm zur EXE kompilieren
-    # Wir fügen --collect-all customtkinter hinzu, damit das Design sicher dabei ist
     - name: Build EXE with PyInstaller
       run: |
         pyinstaller --noconsole --onefile --name "TicketPrinter" --icon "assets/Thermal-Printer.ico" --collect-all customtkinter universal_ticket_printer.py
 
-    # 2. Inno Setup installieren (Fix: Wir nutzen jetzt Chocolatey statt der kaputten Action)
+    # 2. Inno Setup installieren
     - name: Install Inno Setup
       run: choco install innosetup --no-progress
 
-    # 3. Automatisch die Installer-Konfiguration (.iss) erstellen
+    # 3. Installer-Skript erstellen
     - name: Generate Inno Setup Script
       shell: powershell
       run: |
+        $version = "${{ github.ref_name }}" -replace "v",""
+        if ($version -eq "main") { $version = "1.0.0" } 
+        
         $issContent = @"
         [Setup]
         AppName=Universal Ticket Printer
-        AppVersion=1.0
+        AppVersion=$version
         DefaultDirName={autopf}\TicketPrinter
         DefaultGroupName=TicketPrinter
         OutputBaseFilename=TicketPrinter_Setup
         Compression=lzma
         SolidCompression=yes
         ArchitecturesInstallIn64BitMode=x64
+        OutputDir=Output
 
         [Tasks]
         Name: "desktopicon"; Description: "Erstelle ein Desktop-Icon"; GroupDescription: "Zusätzliche Icons:"; Flags: unchecked
 
         [Files]
-        ; Die eigentliche Programm-Datei
         Source: "dist\TicketPrinter.exe"; DestDir: "{app}"; Flags: ignoreversion
-        ; Der Poppler Ordner (für PDF/LaTeX)
         Source: "poppler\*"; DestDir: "{app}\poppler"; Flags: ignoreversion recursesubdirs createallsubdirs
-        ; Die Assets (Icons, Fonts)
         Source: "assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 
         [Icons]
@@ -67,13 +71,15 @@ jobs:
         
         $issContent | Out-File "setup_script.iss" -Encoding ASCII
 
-    # 4. Den Installer bauen (Mit absolutem Pfad, da choco den Pfad evtl. nicht sofort aktualisiert)
+    # 4. Installer bauen
     - name: Compile Installer
       run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup_script.iss'
 
-    # 5. Das Ergebnis auf GitHub hochladen
-    - name: Upload Installer
-      uses: actions/upload-artifact@v4
+    # 5. Release erstellen und Datei hochladen (NUR bei Tags)
+    - name: Release
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
       with:
-        name: TicketPrinter_Setup
-        path: Output/TicketPrinter_Setup.exe
+        files: Output/TicketPrinter_Setup.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
