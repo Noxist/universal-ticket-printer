@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import shutil
 import webbrowser
-import importlib.util  # Neu fuer schnellen Check ohne Import
+import importlib.util
 from datetime import datetime
 from typing import List, Optional
 
@@ -33,7 +33,7 @@ except ImportError:
 # GLOBAL PATH & SETTINGS MANAGEMENT
 # ----------------------------------------------------------------------
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.4"
 UPDATE_URL_VERSION = "https://raw.githubusercontent.com/noxist/universal-ticket-printer/main/version.txt"
 UPDATE_URL_LINK = "https://github.com/noxist/universal-ticket-printer/releases"
 
@@ -98,7 +98,6 @@ def save_settings(data):
         print(f"Failed to save settings: {e}")
         return False
 
-# Initiale Settings laden
 load_settings()
 
 # ----------------------------------------------------------------------
@@ -221,13 +220,22 @@ def render_receipt_image(title: str, body_lines: List[str], add_dt: bool = True)
     return img
 
 # ----------------------------------------------------------------------
-# LATEX ENGINE (Optimized Lazy Loading)
+# LATEX ENGINE
 # ----------------------------------------------------------------------
 def _check_pdflatex():
-    return shutil.which("pdflatex") is not None
+    # Auch hier Fenster unterdruecken beim Check
+    try:
+        startupinfo = None
+        creationflags = 0
+        if os.name == 'nt':
+            creationflags = subprocess.CREATE_NO_WINDOW
+        
+        subprocess.run(["pdflatex", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
+        return True
+    except:
+        return shutil.which("pdflatex") is not None
 
 def render_with_pdflatex(latex_code: str) -> Image.Image:
-    # Lazy Import für Speed
     try:
         from pdf2image import convert_from_path
     except ImportError:
@@ -271,8 +279,13 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
             f.write(tex_template)
             
         try:
+            # FIX: Unterdrueckung des schwarzen Fensters
+            creationflags = 0
+            if os.name == 'nt':
+                creationflags = subprocess.CREATE_NO_WINDOW
+            
             cmd = ["pdflatex", "-interaction=nonstopmode", "ticket.tex"]
-            subprocess.run(cmd, cwd=temp_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            subprocess.run(cmd, cwd=temp_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=creationflags)
         except subprocess.CalledProcessError:
             log_content = "Kein Log gefunden."
             try:
@@ -285,7 +298,6 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
         except FileNotFoundError:
              raise RuntimeError("LaTeX (pdflatex) nicht gefunden. Bitte installiere MiKTeX.")
 
-        # --- POPPLER AUTO-DETECT ---
         poppler_path = None
         local_poppler = os.path.join(BASE_DIR, "poppler", "bin")
         if os.path.exists(local_poppler):

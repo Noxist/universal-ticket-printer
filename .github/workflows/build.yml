@@ -25,44 +25,38 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller auto-py-to-exe customtkinter packaging paho-mqtt Pillow requests pdf2image
 
-    # NEU: Poppler herunterladen und bereitstellen
-    - name: Download and Setup Poppler
+    # ROBUSTERER Poppler Download
+    - name: Download Poppler
       shell: powershell
       run: |
-        # Neueste stabile Poppler Version für Windows herunterladen (angepasst an aktuellen Release)
         $url = "https://github.com/oschwartz10612/poppler-windows/releases/download/v24.02.0-0/Release-24.02.0-0.zip"
         $output = "poppler.zip"
         
-        Write-Host "Downloading Poppler from $url..."
+        Write-Host "Downloading Poppler..."
         Invoke-WebRequest -Uri $url -OutFile $output
         
-        Write-Host "Extracting Poppler..."
-        Expand-Archive -Path $output -DestinationPath "poppler_temp"
+        Write-Host "Extracting..."
+        Expand-Archive -Path $output -DestinationPath "poppler_extracted"
         
-        # Verschiebe den Library-Ordner (enthält bin, lib, include) nach 'poppler' im Root
-        # Die Struktur im Zip ist meist Release-X.X.X-0/Library
-        $extractedRoot = Get-ChildItem -Path "poppler_temp" | Select-Object -First 1
-        $libraryPath = Join-Path $extractedRoot.FullName "Library"
+        # Sucht den 'Library' Ordner, egal wo er im Zip liegt (sicherer)
+        $libPath = Get-ChildItem -Path "poppler_extracted" -Recurse -Directory -Filter "Library" | Select-Object -First 1
         
-        if (Test-Path $libraryPath) {
-            Move-Item -Path $libraryPath -Destination "poppler"
-            Write-Host "Poppler setup complete."
+        if ($libPath) {
+            Move-Item -Path $libPath.FullName -Destination "poppler"
+            Write-Host "Poppler successfully moved to root."
         } else {
-            Write-Error "Could not find Library folder in extracted poppler archive."
+            Write-Error "Library folder not found inside zip!"
             exit 1
         }
 
-    # 1. Programm zur EXE kompilieren
     - name: Build EXE with PyInstaller
       run: |
         pyinstaller --noconsole --onefile --name "TicketPrinter" --icon "assets/Thermal-Printer.ico" --collect-all customtkinter universal_ticket_printer.py
 
-    # 2. Inno Setup installieren
     - name: Install Inno Setup
       run: choco install innosetup --no-progress
 
-    # 3. Installer-Skript erstellen
-    # FIX: Encoding auf UTF8 gesetzt, damit Umlaute (ä, ö, ü) im Installer korrekt sind
+    # Encoding Fix für Umlaute (äöü)
     - name: Generate Inno Setup Script
       shell: powershell
       run: |
@@ -97,14 +91,12 @@ jobs:
         Filename: "{app}\TicketPrinter.exe"; Description: "Programm starten"; Flags: nowait postinstall skipifsilent
         "@
         
-        # WICHTIG: UTF8 Encoding für korrekte Umlaute im Wizard
-        $issContent | Out-File "setup_script.iss" -Encoding UTF8
+        # Schreibt die Datei explizit als UTF8 mit BOM für Inno Setup
+        [System.IO.File]::WriteAllLines("$(Get-Location)\setup_script.iss", $issContent, [System.Text.Encoding]::UTF8)
 
-    # 4. Installer bauen
     - name: Compile Installer
       run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup_script.iss'
 
-    # 5. Release erstellen und Datei hochladen (NUR bei Tags)
     - name: Release
       uses: softprops/action-gh-release@v1
       if: startsWith(github.ref, 'refs/tags/')
