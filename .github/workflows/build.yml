@@ -1,0 +1,78 @@
+name: Build Setup.exe
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install Dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install pyinstaller
+
+    # 1. Programm zur EXE kompilieren
+    - name: Build EXE with PyInstaller
+      run: |
+        pyinstaller --noconsole --onefile --name "TicketPrinter" --icon "assets/Thermal-Printer.ico" universal_ticket_printer.py
+
+    # 2. Inno Setup installieren (Das Tool für den Installer)
+    - name: Setup Inno Setup
+      uses: Minionguyjosh/setup-inno-setup@v1.2.0
+
+    # 3. Automatisch die Installer-Konfiguration (.iss) erstellen
+    - name: Generate Inno Setup Script
+      shell: powershell
+      run: |
+        $issContent = @"
+        [Setup]
+        AppName=Universal Ticket Printer
+        AppVersion=1.0
+        DefaultDirName={autopf}\TicketPrinter
+        DefaultGroupName=TicketPrinter
+        OutputBaseFilename=TicketPrinter_Setup
+        Compression=lzma
+        SolidCompression=yes
+        ArchitecturesInstallIn64BitMode=x64
+
+        [Tasks]
+        Name: "desktopicon"; Description: "Erstelle ein Desktop-Icon"; GroupDescription: "Zusätzliche Icons:"; Flags: unchecked
+
+        [Files]
+        ; Die eigentliche Programm-Datei
+        Source: "dist\TicketPrinter.exe"; DestDir: "{app}"; Flags: ignoreversion
+        ; Der Poppler Ordner (für PDF/LaTeX)
+        Source: "poppler\*"; DestDir: "{app}\poppler"; Flags: ignoreversion recursesubdirs createallsubdirs
+        ; Die Assets (Icons, Fonts)
+        Source: "assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+        [Icons]
+        Name: "{group}\Ticket Printer"; Filename: "{app}\TicketPrinter.exe"; IconFilename: "{app}\assets\Thermal-Printer.ico"
+        Name: "{autodesktop}\Ticket Printer"; Filename: "{app}\TicketPrinter.exe"; IconFilename: "{app}\assets\Thermal-Printer.ico"; Tasks: desktopicon
+
+        [Run]
+        Filename: "{app}\TicketPrinter.exe"; Description: "Programm starten"; Flags: nowait postinstall skipifsilent
+        "@
+        
+        $issContent | Out-File "setup_script.iss" -Encoding ASCII
+
+    # 4. Den Installer bauen
+    - name: Compile Installer
+      run: iscc setup_script.iss
+
+    # 5. Das Ergebnis auf GitHub hochladen
+    - name: Upload Installer
+      uses: actions/upload-artifact@v4
+      with:
+        name: TicketPrinter_Setup
+        path: Output/TicketPrinter_Setup.exe
