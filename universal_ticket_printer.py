@@ -579,7 +579,7 @@ class ModernPrinterApp(ctk.CTk):
         self.font_main = (APP_SETTINGS["font_family"], 13)
         self.font_head = (APP_SETTINGS["font_family"], 20, "bold")
         self.font_mono = ("Consolas", 12)
-        self.title(f"Universal Ticket Printer PRO v{APP_VERSION} (Open Source)")
+        self.title("Universal Ticket Printer")
         
         try:
             if os.path.exists(ICON_FILE):
@@ -623,6 +623,7 @@ class ModernPrinterApp(ctk.CTk):
         self.selected_images = []
         self.frames = {}
         self.latest_latex_preview = None
+        self.latest_latex_source = None
         
         # Frames init
         self._init_bulk_frame()
@@ -676,10 +677,21 @@ class ModernPrinterApp(ctk.CTk):
             threading.Thread(target=_check, daemon=True).start()
 
     def _show_update_dialog(self, new_ver):
+        is_preview = "preview" in APP_VERSION.lower()
         msg = (
             f"A new update is available!\nCurrent: {APP_VERSION}\nNew: {new_ver}\n\n"
             "Download and install automatically now?"
         )
+        if is_preview:
+            msg = (
+                f"A new stable release is available!\nCurrent: {APP_VERSION}\nNew: {new_ver}\n\n"
+                "Preview builds do not auto-install stable releases.\n"
+                "Open the download page instead?"
+            )
+            if messagebox.askyesno("Update", msg):
+                webbrowser.open(UPDATE_URL_LINK)
+            return
+
         if messagebox.askyesno("Update", msg):
             self._bg_task(lambda: self._download_and_install_update(new_ver))
         else:
@@ -739,6 +751,22 @@ class ModernPrinterApp(ctk.CTk):
                             hover_color=("gray70", "gray30"), anchor="w", font=self.font_main, height=40)
         btn.grid(row=row, column=0, padx=20, pady=5, sticky="ew")
         return btn
+
+    def _check_latex_tools_async(self):
+        def _check():
+            has_latex = _check_pdflatex()
+            has_pdf2image = importlib.util.find_spec("pdf2image") is not None
+            if not has_latex:
+                status_txt = "⚠️ Error: MiKTeX missing (Download required!)"
+                color = "red"
+            elif not has_pdf2image:
+                status_txt = "⚠️ Error: Library missing"
+                color = "orange"
+            else:
+                status_txt = "✅ LaTeX Engine Ready"
+                color = "gray"
+            self.after(0, lambda: self.lbl_tools.configure(text=status_txt, text_color=color))
+        threading.Thread(target=_check, daemon=True).start()
 
     def _select_nav(self, btn):
         for b in [self.btn_bulk, self.btn_tpl, self.btn_raw, self.btn_imgs, self.btn_settings, self.btn_latex]:
@@ -872,20 +900,7 @@ class ModernPrinterApp(ctk.CTk):
         self.latex_dt.pack(side="left")
         
         # STATUS CHECK
-        has_latex = _check_pdflatex()
-        has_pdf2image = importlib.util.find_spec("pdf2image") is not None
-        
-        if not has_latex:
-            status_txt = "⚠️ Error: MiKTeX missing (Download required!)"
-            color = "red"
-        elif not has_pdf2image:
-            status_txt = "⚠️ Error: Library missing"
-            color = "orange"
-        else:
-            status_txt = "✅ LaTeX Engine Ready"
-            color = "gray"
-
-        self.lbl_tools = ctk.CTkLabel(opts, text=status_txt, text_color=color)
+        self.lbl_tools = ctk.CTkLabel(opts, text="Checking LaTeX tools...", text_color="gray")
         self.lbl_tools.pack(side="right")
         
         btn_row = ctk.CTkFrame(f, fg_color="transparent")
@@ -893,11 +908,11 @@ class ModernPrinterApp(ctk.CTk):
         ctk.CTkButton(btn_row, text="Preview", command=self.do_latex_preview, fg_color="#2980b9", width=150).pack(side="left", padx=(0,10))
         ctk.CTkButton(btn_row, text="Print", command=self.do_latex_print, fg_color="#8e44ad", width=150).pack(side="left")
         ctk.CTkButton(btn_row, text="Fullscreen Preview", command=self.open_latex_fullscreen_preview, width=180).pack(side="left", padx=(10, 0))
-        ctk.CTkButton(btn_row, text="Get MiKTeX", command=lambda: webbrowser.open(MIKTEX_URL), width=140).pack(side="right")
         self.scroll_preview = ctk.CTkScrollableFrame(f, fg_color=("white", "gray15"), height=250)
         self.scroll_preview.pack(fill="both", expand=True)
         self.lbl_latex_preview = ctk.CTkLabel(self.scroll_preview, text="Preview here...", text_color="gray")
         self.lbl_latex_preview.pack(pady=20, padx=20)
+        self._check_latex_tools_async()
 
     def show_latex(self):
         self._select_nav(self.btn_latex)
@@ -907,8 +922,10 @@ class ModernPrinterApp(ctk.CTk):
         self.lbl_latex_preview.configure(image=None, text="Rendering...")
         self.update()
         try:
-            img = render_latex_image(self.latex_input.get("1.0", "end").strip(), self.latex_title.get(), self.latex_dt.get())
+            source = self._current_latex_source()
+            img = render_latex_image(source, self.latex_title.get(), self.latex_dt.get())
             self.latest_latex_preview = img
+            self.latest_latex_source = source
             self.display_preview(img, self.lbl_latex_preview, max_height=800)
         except Exception as e:
             self.lbl_latex_preview.configure(text=f"Error: {e}")
@@ -918,10 +935,23 @@ class ModernPrinterApp(ctk.CTk):
         self._bg_task(lambda: print_master(render_latex_image(code, title, dt), True))
 
     def open_latex_fullscreen_preview(self):
-        if not getattr(self, "latest_latex_preview", None):
-            messagebox.showinfo("Preview", "Generate a preview first.")
-            return
+        source = self._current_latex_source()
+        if self.latest_latex_preview is None or source != self.latest_latex_source:
+            self.lbl_latex_preview.configure(image=None, text="Rendering...")
+            self.update()
+            try:
+                img = render_latex_image(source, self.latex_title.get(), self.latex_dt.get())
+                self.latest_latex_preview = img
+                self.latest_latex_source = source
+                self.display_preview(img, self.lbl_latex_preview, max_height=800)
+            except Exception as e:
+                self.lbl_latex_preview.configure(text=f"Error: {e}")
+                messagebox.showerror("Preview Error", f"Failed to render preview.\n{e}")
+                return
         self._open_image_fullscreen(self.latest_latex_preview)
+
+    def _current_latex_source(self) -> str:
+        return self.latex_input.get("1.0", "end").strip()
 
     def display_preview(self, pil_img, label_widget, max_height: int = 600):
         display_img = pil_img.copy()

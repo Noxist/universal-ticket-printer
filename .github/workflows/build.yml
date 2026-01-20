@@ -97,6 +97,7 @@ jobs:
 
         [Tasks]
         Name: "desktopicon"; Description: "Create a desktop icon"; GroupDescription: "Additional icons:"; Flags: unchecked
+        Name: "miktex"; Description: "Open MiKTeX download page"; GroupDescription: "Additional tools:"; Flags: unchecked
 
         [Files]
         Source: "dist\TicketPrinter.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -109,6 +110,7 @@ jobs:
 
         [Run]
         Filename: "{app}\TicketPrinter.exe"; Description: "Launch program"; Flags: nowait postinstall skipifsilent
+        Filename: "https://miktex.org/download"; Description: "Get MiKTeX (LaTeX support)"; Flags: shellexec postinstall skipifsilent unchecked; Tasks: miktex
         "@
         
         # Writes the file explicitly as UTF8 with BOM for Inno Setup
