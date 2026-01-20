@@ -13,6 +13,7 @@ import tempfile
 import shutil
 import webbrowser
 import importlib.util
+import ctypes
 from datetime import datetime
 from typing import List, Optional
 
@@ -25,6 +26,7 @@ try:
     import customtkinter as ctk
     from PIL import Image, ImageDraw, ImageFont, ImageTk, ImageOps, ImageChops
     import requests
+    from packaging import version as packaging_version
 except ImportError:
     ctk = None 
     print("CRITICAL: Missing libraries. Run: pip install customtkinter Pillow requests packaging paho-mqtt pdf2image")
@@ -36,6 +38,7 @@ except ImportError:
 APP_VERSION = "1.0.7"
 UPDATE_URL_VERSION = "https://raw.githubusercontent.com/noxist/universal-ticket-printer/main/version.txt"
 UPDATE_URL_LINK = "https://github.com/noxist/universal-ticket-printer/releases"
+UPDATE_URL_API = "https://api.github.com/repos/noxist/universal-ticket-printer/releases/latest"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -60,6 +63,8 @@ DEFAULT_SETTINGS = {
 }
 
 APP_SETTINGS = {}
+
+MIKTEX_URL = "https://miktex.org/download"
 
 def load_settings():
     global APP_SETTINGS
@@ -99,6 +104,59 @@ def save_settings(data):
         return False
 
 load_settings()
+
+def _is_windows_admin() -> bool:
+    if os.name != "nt":
+        return True
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+def _is_path_writable(path: str) -> bool:
+    try:
+        test_file = os.path.join(path, f".write_test_{uuid.uuid4().hex}")
+        with open(test_file, "w", encoding="utf-8") as f:
+            f.write("test")
+        os.remove(test_file)
+        return True
+    except Exception:
+        return False
+
+def ensure_admin_on_first_run():
+    if os.name != "nt":
+        return
+    if os.path.exists(SETTINGS_FILE):
+        return
+    if _is_path_writable(BASE_DIR):
+        return
+    if _is_windows_admin():
+        return
+
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        wants_admin = messagebox.askyesno(
+            "Administrator Rights Required",
+            "The app was installed in a protected folder. To save printer IP and MQTT settings, "
+            "the app should be launched once with administrator rights.\n\n"
+            "Restart now as Administrator?"
+        )
+        root.destroy()
+    except Exception:
+        wants_admin = False
+
+    if wants_admin:
+        params = " ".join([f'"{arg}"' for arg in sys.argv])
+        ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            sys.executable,
+            params,
+            None,
+            1
+        )
+        sys.exit(0)
 
 # ----------------------------------------------------------------------
 # PRINTER LOGIC (Backend)
@@ -257,6 +315,12 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
 \usepackage{amsmath}
 \usepackage{amssymb}
 \usepackage{amsfonts}
+\usepackage{mathtools}
+\usepackage{physics}
+\usepackage{siunitx}
+\usepackage{bm}
+\usepackage{upgreek}
+\usepackage{pifont}
 \usepackage{graphicx}
 \usepackage{enumitem}
 \usepackage{geometry}
@@ -558,6 +622,7 @@ class ModernPrinterApp(ctk.CTk):
         
         self.selected_images = []
         self.frames = {}
+        self.latest_latex_preview = None
         
         # Frames init
         self._init_bulk_frame()
@@ -585,7 +650,7 @@ class ModernPrinterApp(ctk.CTk):
             miktex_msg = (
                 "\n\nWARNING: MiKTeX (LaTeX) was not found!\n"
                 "To print math/physics formulas, you must install MiKTeX.\n"
-                "Download: https://miktex.org/download"
+                f"Download: {MIKTEX_URL}"
             )
             
         messagebox.showinfo(
@@ -594,7 +659,7 @@ class ModernPrinterApp(ctk.CTk):
         )
         if miktex_msg:
             if messagebox.askyesno("Install MiKTeX?", "Do you want to open the MiKTeX download page now?"):
-                webbrowser.open("https://miktex.org/download")
+                webbrowser.open(MIKTEX_URL)
 
     def check_for_updates(self):
         def _check():
@@ -602,7 +667,7 @@ class ModernPrinterApp(ctk.CTk):
                 r = requests.get(UPDATE_URL_VERSION, timeout=3)
                 if r.status_code == 200:
                     latest = r.text.strip()
-                    if latest != APP_VERSION:
+                    if packaging_version.parse(latest) > packaging_version.parse(APP_VERSION):
                         self.after(0, lambda: self._show_update_dialog(latest))
             except Exception as e:
                 print(f"Update Check failed: {e}")
@@ -611,9 +676,62 @@ class ModernPrinterApp(ctk.CTk):
             threading.Thread(target=_check, daemon=True).start()
 
     def _show_update_dialog(self, new_ver):
-        msg = f"A new update is available!\nCurrent: {APP_VERSION}\nNew: {new_ver}\n\nDownload now?"
+        msg = (
+            f"A new update is available!\nCurrent: {APP_VERSION}\nNew: {new_ver}\n\n"
+            "Download and install automatically now?"
+        )
         if messagebox.askyesno("Update", msg):
+            self._bg_task(lambda: self._download_and_install_update(new_ver))
+        else:
+            if messagebox.askyesno("Open download page?", "Do you want to open the release page instead?"):
+                webbrowser.open(UPDATE_URL_LINK)
+
+    def _download_and_install_update(self, new_ver: str) -> str:
+        if os.name != "nt" or not getattr(sys, "frozen", False):
             webbrowser.open(UPDATE_URL_LINK)
+            return "Update: Opened download page"
+
+        try:
+            headers = {"Accept": "application/vnd.github+json"}
+            response = requests.get(UPDATE_URL_API, headers=headers, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            return f"Update failed: {e}"
+
+        assets = data.get("assets", [])
+        setup_asset = None
+        for asset in assets:
+            name = asset.get("name", "").lower()
+            if name.endswith(".exe"):
+                setup_asset = asset
+                break
+
+        if not setup_asset:
+            return "Update failed: No installer asset found"
+
+        download_url = setup_asset.get("browser_download_url")
+        if not download_url:
+            return "Update failed: Missing download URL"
+
+        try:
+            temp_dir = tempfile.mkdtemp()
+            installer_path = os.path.join(temp_dir, setup_asset.get("name", f"TicketPrinter_Update_{new_ver}.exe"))
+            with requests.get(download_url, stream=True, timeout=30) as dl:
+                dl.raise_for_status()
+                with open(installer_path, "wb") as f:
+                    for chunk in dl.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+        except Exception as e:
+            return f"Update failed: {e}"
+
+        try:
+            os.startfile(installer_path)
+            self.after(0, self.destroy)
+            return "Update: Installer launched"
+        except Exception as e:
+            return f"Update failed: {e}"
 
     def _create_nav_btn(self, text, row, cmd):
         btn = ctk.CTkButton(self.sidebar_frame, text=text, command=cmd, 
@@ -774,6 +892,8 @@ class ModernPrinterApp(ctk.CTk):
         btn_row.pack(fill="x", pady=(0,10))
         ctk.CTkButton(btn_row, text="Preview", command=self.do_latex_preview, fg_color="#2980b9", width=150).pack(side="left", padx=(0,10))
         ctk.CTkButton(btn_row, text="Print", command=self.do_latex_print, fg_color="#8e44ad", width=150).pack(side="left")
+        ctk.CTkButton(btn_row, text="Fullscreen Preview", command=self.open_latex_fullscreen_preview, width=180).pack(side="left", padx=(10, 0))
+        ctk.CTkButton(btn_row, text="Get MiKTeX", command=lambda: webbrowser.open(MIKTEX_URL), width=140).pack(side="right")
         self.scroll_preview = ctk.CTkScrollableFrame(f, fg_color=("white", "gray15"), height=250)
         self.scroll_preview.pack(fill="both", expand=True)
         self.lbl_latex_preview = ctk.CTkLabel(self.scroll_preview, text="Preview here...", text_color="gray")
@@ -788,7 +908,8 @@ class ModernPrinterApp(ctk.CTk):
         self.update()
         try:
             img = render_latex_image(self.latex_input.get("1.0", "end").strip(), self.latex_title.get(), self.latex_dt.get())
-            self.display_preview(img, self.lbl_latex_preview)
+            self.latest_latex_preview = img
+            self.display_preview(img, self.lbl_latex_preview, max_height=800)
         except Exception as e:
             self.lbl_latex_preview.configure(text=f"Error: {e}")
 
@@ -796,14 +917,58 @@ class ModernPrinterApp(ctk.CTk):
         code, title, dt = self.latex_input.get("1.0", "end").strip(), self.latex_title.get(), self.latex_dt.get()
         self._bg_task(lambda: print_master(render_latex_image(code, title, dt), True))
 
-    def display_preview(self, pil_img, label_widget):
+    def open_latex_fullscreen_preview(self):
+        if not getattr(self, "latest_latex_preview", None):
+            messagebox.showinfo("Preview", "Generate a preview first.")
+            return
+        self._open_image_fullscreen(self.latest_latex_preview)
+
+    def display_preview(self, pil_img, label_widget, max_height: int = 600):
         display_img = pil_img.copy()
-        if display_img.height > 600:
-            ratio = 600 / display_img.height
-            display_img = display_img.resize((int(display_img.width * ratio), 600))
+        if display_img.height > max_height:
+            ratio = max_height / display_img.height
+            display_img = display_img.resize((int(display_img.width * ratio), max_height))
         ctk_img = ctk.CTkImage(light_image=display_img, dark_image=display_img, size=display_img.size)
         label_widget.configure(image=ctk_img, text="")
         label_widget.image = ctk_img 
+
+    def _open_image_fullscreen(self, pil_img: Image.Image):
+        fullscreen = ctk.CTkToplevel(self)
+        fullscreen.title("LaTeX Preview")
+        fullscreen.attributes("-fullscreen", True)
+        fullscreen.grid_rowconfigure(1, weight=1)
+        fullscreen.grid_columnconfigure(0, weight=1)
+
+        header = ctk.CTkFrame(fullscreen, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=20, pady=10)
+        header.grid_columnconfigure(2, weight=1)
+
+        ctk.CTkLabel(header, text="Preview (Esc to close)", font=self.font_head).grid(row=0, column=0, sticky="w")
+
+        scale_var = tk.DoubleVar(value=1.0)
+        ctk.CTkLabel(header, text="Zoom").grid(row=0, column=1, padx=(20, 5))
+        zoom_slider = ctk.CTkSlider(header, from_=0.5, to=3.0, number_of_steps=50, variable=scale_var, width=200)
+        zoom_slider.grid(row=0, column=2, sticky="w")
+
+        close_btn = ctk.CTkButton(header, text="Close", command=fullscreen.destroy)
+        close_btn.grid(row=0, column=3, padx=(20, 0))
+
+        container = ctk.CTkScrollableFrame(fullscreen, fg_color=("white", "gray15"))
+        container.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 20))
+        img_label = ctk.CTkLabel(container, text="")
+        img_label.pack(pady=10, padx=10)
+
+        def render_scaled_image(*_):
+            scale = scale_var.get()
+            scaled = pil_img.resize((int(pil_img.width * scale), int(pil_img.height * scale)), Image.Resampling.LANCZOS)
+            ctk_img = ctk.CTkImage(light_image=scaled, dark_image=scaled, size=scaled.size)
+            img_label.configure(image=ctk_img, text="")
+            img_label.image = ctk_img
+
+        scale_var.trace_add("write", render_scaled_image)
+        render_scaled_image()
+
+        fullscreen.bind("<Escape>", lambda event: fullscreen.destroy())
 
     def _init_image_frame(self):
         f = ctk.CTkFrame(self.main_container, fg_color="transparent")
@@ -932,5 +1097,6 @@ class ModernPrinterApp(ctk.CTk):
         APP_SETTINGS.update(new_data)
 
 if __name__ == "__main__":
+    ensure_admin_on_first_run()
     app = ModernPrinterApp()
     app.mainloop()
