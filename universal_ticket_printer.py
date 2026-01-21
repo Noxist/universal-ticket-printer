@@ -202,8 +202,13 @@ def _update_manifest(
     _write_manifest(pre_entries, updated_app)
 
 def _parse_missing_dependencies(log_text: str) -> Tuple[Optional[str], Optional[str]]:
-    package_match = re.search(r"! LaTeX Error: File `(.+?)\\.sty' not found", log_text)
+    # Erweitert: Erkennt nun .sty (Styles), .tfm (Fonts), .fd (Font-Definitions), 
+    # .cfg (Configs), .def (Definitions) und .cls (Classes)
+    package_match = re.search(r"! LaTeX Error: File `(.+?)\.(?:sty|tfm|fd|cfg|def|cls)' not found", log_text)
+    
+    # Erkennt fehlende TikZ-Bibliotheken
     tikz_match = re.search(r"I did not know the library '([^']+)'", log_text)
+    
     return (
         package_match.group(1) if package_match else None,
         tikz_match.group(1) if tikz_match else None
