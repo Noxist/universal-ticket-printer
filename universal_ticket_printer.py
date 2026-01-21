@@ -202,8 +202,8 @@ def _update_manifest(
     _write_manifest(pre_entries, updated_app)
 
 def _parse_missing_dependencies(log_text: str) -> Tuple[Optional[str], Optional[str]]:
-    # Erweitert: Erkennt nun .sty (Styles), .tfm (Fonts), .fd (Font-Definitions), 
-    # .cfg (Configs), .def (Definitions) und .cls (Classes)
+    # Wir nutzen r"" (Raw-Strings), damit die Backslashes und Punkte 1:1 übernommen werden
+    # Die Erweiterung sucht nun nach allen relevanten LaTeX-Dateitypen
     package_match = re.search(r"! LaTeX Error: File `(.+?)\.(?:sty|tfm|fd|cfg|def|cls)' not found", log_text)
     
     # Erkennt fehlende TikZ-Bibliotheken
