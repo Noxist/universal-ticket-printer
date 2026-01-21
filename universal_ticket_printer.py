@@ -14,6 +14,7 @@ import shutil
 import webbrowser
 import importlib.util
 import ctypes
+import time
 from datetime import datetime
 from typing import List, Optional
 
@@ -35,7 +36,7 @@ except ImportError:
 # GLOBAL PATH & SETTINGS MANAGEMENT
 # ----------------------------------------------------------------------
 
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.1.0" # Version bump for new feature
 UPDATE_URL_VERSION = "https://raw.githubusercontent.com/noxist/universal-ticket-printer/main/version.txt"
 UPDATE_URL_LINK = "https://github.com/noxist/universal-ticket-printer/releases"
 UPDATE_URL_API = "https://api.github.com/repos/noxist/universal-ticket-printer/releases/latest"
@@ -47,6 +48,8 @@ else:
 
 SETTINGS_FILE = os.path.join(BASE_DIR, "printer_settings.json")
 ICON_FILE = os.path.join(BASE_DIR, "assets", "Thermal-Printer.ico")
+LOG_FILE = os.path.join(BASE_DIR, "printer_debug.log")
+INSTALLED_LIBS_FILE = os.path.join(BASE_DIR, "installed_libraries.txt")
 
 DEFAULT_SETTINGS = {
     "bulk_delimiter": "::",
@@ -66,6 +69,33 @@ APP_SETTINGS = {}
 
 MIKTEX_URL = "https://miktex.org/download"
 
+# --- LOGGING & DEBUGGING HELPERS ---
+
+def _log_debug(message: str):
+    """Writes a message to the debug log file silently."""
+    timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+    log_entry = f"{timestamp} {message}\n"
+    print(log_entry.strip()) # Print to console for dev
+    
+    # Try writing to file, ignore if permission denied to avoid crash
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(log_entry)
+    except PermissionError:
+        print(f"WARNING: No write permission for log file at {LOG_FILE}")
+    except Exception as e:
+        print(f"Log Error: {e}")
+
+def _track_installed_lib(package_name: str):
+    """Records a newly installed LaTeX package to the tracking file."""
+    _log_debug(f"AUTO-INSTALL: Successfully installed '{package_name}'")
+    try:
+        entry = f"{package_name} (Installed on {datetime.now().strftime('%Y-%m-%d %H:%M')})\n"
+        with open(INSTALLED_LIBS_FILE, "a", encoding="utf-8") as f:
+            f.write(entry)
+    except Exception:
+        pass
+
 def load_settings():
     global APP_SETTINGS
     defaults = DEFAULT_SETTINGS.copy()
@@ -75,7 +105,7 @@ def load_settings():
                 data = json.load(f)
                 defaults.update(data)
         except Exception as e:
-            print(f"Error loading settings: {e}")
+            _log_debug(f"Error loading settings: {e}")
     
     APP_SETTINGS = defaults
     return APP_SETTINGS
@@ -100,7 +130,7 @@ def save_settings(data):
         except: pass
         return False
     except Exception as e:
-        print(f"Failed to save settings: {e}")
+        _log_debug(f"Failed to save settings: {e}")
         return False
 
 load_settings()
@@ -278,7 +308,7 @@ def render_receipt_image(title: str, body_lines: List[str], add_dt: bool = True)
     return img
 
 # ----------------------------------------------------------------------
-# LATEX ENGINE
+# LATEX ENGINE (Updated with Auto-Install)
 # ----------------------------------------------------------------------
 def _check_pdflatex():
     try:
@@ -307,7 +337,7 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
         if not ("\\begin{tikzpicture}" in content or "$$" in content or "\\[" in content):
              content = f"\\[ {content} \\]"
     
-    # --- FIXED TEMPLATE WITH TCOLORBOX AND WAVE STYLE ---
+    # --- TEMPLATE DEFINITION ---
     tex_template = r"""
 \documentclass[11pt]{article}
 \usepackage[utf8]{inputenc}
@@ -335,7 +365,7 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
 \usepackage{tabularx}    
 \usepackage{eurosym}
 \usepackage[most]{tcolorbox}
-\usetikzlibrary{patterns,decorations.pathmorphing,decorations.markings,calc}
+\usetikzlibrary{patterns,decorations.pathmorphing,decorations.markings,calc,arrows.meta,shapes.geometric}
 
 %% Custom Definitions for Printer
 \tikzset{wave/.style={decorate, decoration={snake, amplitude=2pt, segment length=5pt, post length=2pt}}}
@@ -351,6 +381,16 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
 """ % content
 
     temp_dir = tempfile.mkdtemp()
+    
+    # SETUP FLAGS TO HIDE CONSOLE WINDOWS
+    creationflags = 0
+    startupinfo = None
+    if os.name == 'nt':
+        creationflags = subprocess.CREATE_NO_WINDOW
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+
     try:
         tex_file = os.path.join(temp_dir, "ticket.tex")
         pdf_file = os.path.join(temp_dir, "ticket.pdf")
@@ -358,31 +398,66 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
         with open(tex_file, "w", encoding="utf-8") as f:
             f.write(tex_template)
             
-        try:
-            creationflags = 0
-            startupinfo = None
-            if os.name == 'nt':
-                creationflags = subprocess.CREATE_NO_WINDOW
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = subprocess.SW_HIDE
-            
-            cmd = ["pdflatex", "-interaction=nonstopmode", "ticket.tex"]
-            subprocess.run(cmd, cwd=temp_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=creationflags, startupinfo=startupinfo)
-        except subprocess.CalledProcessError as e:
-            log_content = "No log found."
+        cmd = ["pdflatex", "-interaction=nonstopmode", "ticket.tex"]
+
+        # --- RETRY LOOP FOR AUTO-INSTALL ---
+        max_retries = 2
+        for attempt in range(max_retries):
             try:
+                subprocess.run(cmd, cwd=temp_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=creationflags, startupinfo=startupinfo)
+                break # Success!
+            except subprocess.CalledProcessError as e:
+                # If this was the last attempt, fail loudly
+                if attempt == max_retries - 1:
+                    log_content = "No log found."
+                    try:
+                        log_path = os.path.join(temp_dir, "ticket.log")
+                        if os.path.exists(log_path):
+                            with open(log_path, "r", encoding="utf-8", errors="ignore") as log:
+                                log_content = log.read()
+                    except: pass
+                    
+                    _log_debug(f"LaTeX Compilation FAILED.\nLast Log:\n{log_content[-500:]}")
+                    err_msg = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ""
+                    raise RuntimeError(f"LaTeX Error (Check logs).\n{log_content[-800:]}\nSTDERR: {err_msg}")
+                
+                # Check for missing package error
                 log_path = os.path.join(temp_dir, "ticket.log")
                 if os.path.exists(log_path):
                     with open(log_path, "r", encoding="utf-8", errors="ignore") as log:
-                        log_content = log.read()
-            except: pass
-            # Try to grab stderr if available
-            err_msg = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ""
-            raise RuntimeError(f"LaTeX Error.\n{log_content[-800:]}\nSTDERR: {err_msg}")
-        except FileNotFoundError:
-             raise RuntimeError("LaTeX (pdflatex) not found. Please install MiKTeX or TeX Live.")
+                        log_text = log.read()
+                        
+                    # Regex to find missing file/package
+                    match = re.search(r"! LaTeX Error: File `(.+?)\.sty' not found", log_text)
+                    if match:
+                        missing_pkg = match.group(1)
+                        _log_debug(f"Missing package detected: {missing_pkg}. Attempting auto-install...")
+                        
+                        try:
+                            # Try to install package
+                            # Note: --admin is safest if MikTeX is shared, but we try both if one fails or just assume admin if running as admin
+                            install_args = ["mpm", "--admin", "--install", missing_pkg]
+                            subprocess.run(install_args, check=True, creationflags=creationflags, startupinfo=startupinfo)
+                            
+                            # Update FNDB
+                            subprocess.run(["initexmf", "--admin", "--update-fndb"], check=True, creationflags=creationflags, startupinfo=startupinfo)
+                            
+                            _track_installed_lib(missing_pkg)
+                            _log_debug(f"Installed {missing_pkg}. Retrying compilation...")
+                            continue # Retry the loop
+                        except Exception as inst_err:
+                            _log_debug(f"Auto-install failed for {missing_pkg}: {inst_err}")
+                            # Raise immediately if install fails, no point retrying
+                            raise RuntimeError(f"Failed to auto-install package '{missing_pkg}'.\nError: {inst_err}")
+                    else:
+                        # Not a missing package error, re-raise
+                        raise e
+                else:
+                    raise e
+            except FileNotFoundError:
+                 raise RuntimeError("LaTeX (pdflatex) not found. Please install MiKTeX or TeX Live.")
 
+        # --- IMAGE CONVERSION ---
         poppler_path = None
         local_poppler = os.path.join(BASE_DIR, "poppler", "bin")
         if os.path.exists(local_poppler):
@@ -435,9 +510,7 @@ def render_latex_image(latex_code: str, title: str = "", add_dt: bool = False) -
             return final_img
             
         except Exception as e:
-            print(f"Latex Error: {e}")
-            import traceback
-            traceback.print_exc()
+            _log_debug(f"Rendering Failed: {e}")
             return render_receipt_image("LaTeX Error", [str(e)[:400]], False)
 
     return render_matplotlib_fallback(latex_code, title, add_dt)
@@ -539,7 +612,7 @@ def send_mqtt_image(img: Image.Image, cut: bool = True) -> bool:
         client.disconnect()
         return True
     except Exception as e:
-        print(f"MQTT Error: {e}")
+        _log_debug(f"MQTT Error: {e}")
         return False
 
 def send_manual_cut() -> bool:
@@ -679,7 +752,7 @@ class ModernPrinterApp(ctk.CTk):
                     if packaging_version.parse(latest) > packaging_version.parse(APP_VERSION):
                         self.after(0, lambda: self._show_update_dialog(latest))
             except Exception as e:
-                print(f"Update Check failed: {e}")
+                _log_debug(f"Update Check failed: {e}")
 
         if 'requests' in sys.modules:
             threading.Thread(target=_check, daemon=True).start()
@@ -798,7 +871,7 @@ class ModernPrinterApp(ctk.CTk):
                 res = task_func()
                 self._update_status(res)
             except Exception as e:
-                print(e)
+                _log_debug(f"BG Task Error: {e}")
                 self._update_status("Error occurred.")
         threading.Thread(target=wrapper, daemon=True).start()
 
