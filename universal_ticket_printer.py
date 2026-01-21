@@ -15,8 +15,11 @@ import webbrowser
 import importlib.util
 import ctypes
 import time
+import queue
+import logging
+import logging.handlers
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Callable, Tuple, Iterable, Set
 
 # --- UI Imports ---
 import tkinter as tk
@@ -71,28 +74,190 @@ MIKTEX_URL = "https://miktex.org/download"
 
 # --- LOGGING & DEBUGGING HELPERS ---
 
-def _log_debug(message: str):
-    """Writes a message to the debug log file silently."""
-    timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
-    log_entry = f"{timestamp} {message}\n"
-    print(log_entry.strip()) # Print to console for dev
-    
-    # Try writing to file, ignore if permission denied to avoid crash
+LOG_QUEUE: "queue.Queue[logging.LogRecord]" = queue.Queue()
+LOGGER = logging.getLogger("ticket_printer")
+
+def _setup_logging() -> logging.handlers.QueueListener:
+    LOGGER.setLevel(logging.DEBUG)
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(log_entry)
-    except PermissionError:
-        print(f"WARNING: No write permission for log file at {LOG_FILE}")
-    except Exception as e:
-        print(f"Log Error: {e}")
+        file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    except Exception:
+        file_handler = logging.StreamHandler()
+    file_handler.setFormatter(formatter)
+    queue_handler = logging.handlers.QueueHandler(LOG_QUEUE)
+    LOGGER.addHandler(queue_handler)
+    listener = logging.handlers.QueueListener(LOG_QUEUE, file_handler, respect_handler_level=True)
+    listener.start()
+    return listener
+
+LOG_LISTENER = _setup_logging()
+
+def _log_debug(message: str):
+    """Queues a message to the async debug log."""
+    LOGGER.debug(message)
+
+def _log_error(message: str):
+    LOGGER.error(message)
+
+REQUIRED_LATEX_PACKAGES = [
+    "inputenc",
+    "fontenc",
+    "babel",
+    "amsmath",
+    "amssymb",
+    "amsfonts",
+    "mathtools",
+    "physics",
+    "siunitx",
+    "bm",
+    "upgreek",
+    "pifont",
+    "graphicx",
+    "enumitem",
+    "geometry",
+    "tikz",
+    "pgfplots",
+    "circuitikz",
+    "chemfig",
+    "listings",
+    "xcolor",
+    "booktabs",
+    "tabularx",
+    "eurosym",
+    "tcolorbox",
+]
+
+REQUIRED_TIKZ_LIBRARIES = [
+    "patterns",
+    "decorations.pathmorphing",
+    "decorations.markings",
+    "calc",
+    "arrows.meta",
+    "shapes.geometric",
+]
+
+def _read_manifest() -> Tuple[Set[str], Set[str]]:
+    pre_installed: Set[str] = set()
+    app_installed: Set[str] = set()
+    if not os.path.exists(INSTALLED_LIBS_FILE):
+        return pre_installed, app_installed
+    current = None
+    try:
+        with open(INSTALLED_LIBS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if stripped.lower().startswith("[pre-installed]"):
+                    current = "pre"
+                    continue
+                if stripped.lower().startswith("[app-installed]"):
+                    current = "app"
+                    continue
+                if current == "pre":
+                    pre_installed.add(stripped)
+                elif current == "app":
+                    app_installed.add(stripped)
+    except Exception as exc:
+        _log_debug(f"Manifest read failed: {exc}")
+    return pre_installed, app_installed
+
+def _write_manifest(pre_installed: Iterable[str], app_installed: Iterable[str]) -> None:
+    with open(INSTALLED_LIBS_FILE, "w", encoding="utf-8") as f:
+        f.write("[Pre-installed]\n")
+        for entry in sorted(set(pre_installed)):
+            f.write(f"{entry}\n")
+        f.write("\n[App-installed]\n")
+        for entry in sorted(set(app_installed)):
+            f.write(f"{entry}\n")
+
+def _update_manifest(
+    required_packages: Optional[Iterable[str]] = None,
+    required_tikz: Optional[Iterable[str]] = None,
+    app_installed: Optional[Iterable[str]] = None
+) -> None:
+    if required_packages is None:
+        required_packages = REQUIRED_LATEX_PACKAGES
+    if required_tikz is None:
+        required_tikz = REQUIRED_TIKZ_LIBRARIES
+    pre_entries = {f"package:{pkg}" for pkg in required_packages}
+    pre_entries.update({f"tikz:{lib}" for lib in required_tikz})
+    _, existing_app = _read_manifest()
+    updated_app = set(existing_app)
+    if app_installed:
+        updated_app.update({f"package:{pkg}" for pkg in app_installed})
+    _write_manifest(pre_entries, updated_app)
+
+def _parse_missing_dependencies(log_text: str) -> Tuple[Optional[str], Optional[str]]:
+    package_match = re.search(r"! LaTeX Error: File `(.+?)\\.sty' not found", log_text)
+    tikz_match = re.search(r"I did not know the library '([^']+)'", log_text)
+    return (
+        package_match.group(1) if package_match else None,
+        tikz_match.group(1) if tikz_match else None
+    )
+
+def _warmup_manifest():
+    pre_installed, app_installed = _read_manifest()
+    entries = pre_installed | app_installed
+    packages = []
+    has_tikz = False
+    for entry in entries:
+        if entry.startswith("package:"):
+            packages.append(entry.split(":", 1)[1])
+        elif entry.startswith("tikz:"):
+            has_tikz = True
+    if has_tikz and "pgf" not in packages:
+        packages.append("pgf")
+    if not packages:
+        return
+    for package in packages:
+        try:
+            _run_subprocess_logged(["mpm", "--admin", "--install", package], timeout=180)
+        except Exception as exc:
+            _log_debug(f"Manifest warm-up failed for {package}: {exc}")
+    try:
+        _run_subprocess_logged(["initexmf", "--admin", "--update-fndb"], timeout=180)
+    except Exception as exc:
+        _log_debug(f"Manifest warm-up update-fndb failed: {exc}")
+
+def _run_subprocess_logged(
+    cmd: List[str],
+    cwd: Optional[str] = None,
+    timeout: int = 10
+) -> Tuple[int, str, str]:
+    _log_debug(f"SUBPROCESS START: {cmd} cwd={cwd} timeout={timeout}")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+    except FileNotFoundError as exc:
+        _log_error(f"SUBPROCESS NOT FOUND: {cmd} error={exc}")
+        raise
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+        _log_error(f"SUBPROCESS TIMEOUT: {cmd} timeout={timeout}")
+        raise RuntimeError(f"Command timed out after {timeout}s: {cmd}")
+    exit_code = proc.returncode
+    _log_debug(f"SUBPROCESS END: {cmd} exit={exit_code}")
+    if stdout:
+        _log_debug(f"STDOUT:\n{stdout}")
+    if stderr:
+        _log_debug(f"STDERR:\n{stderr}")
+    return exit_code, stdout, stderr
 
 def _track_installed_lib(package_name: str):
     """Records a newly installed LaTeX package to the tracking file."""
     _log_debug(f"AUTO-INSTALL: Successfully installed '{package_name}'")
     try:
-        entry = f"{package_name} (Installed on {datetime.now().strftime('%Y-%m-%d %H:%M')})\n"
-        with open(INSTALLED_LIBS_FILE, "a", encoding="utf-8") as f:
-            f.write(entry)
+        _update_manifest(app_installed={package_name})
     except Exception:
         pass
 
@@ -134,6 +299,7 @@ def save_settings(data):
         return False
 
 load_settings()
+_update_manifest()
 
 def _is_windows_admin() -> bool:
     if os.name != "nt":
@@ -187,6 +353,22 @@ def ensure_admin_on_first_run():
             1
         )
         sys.exit(0)
+
+def ensure_base_dir_writable():
+    if _is_path_writable(BASE_DIR):
+        return True
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "Permission Error",
+            "The application folder is not writable.\n"
+            "Please move the app to C:\\Users\\[User]\\Documents and restart."
+        )
+        root.destroy()
+    except Exception:
+        pass
+    return False
 
 # ----------------------------------------------------------------------
 # PRINTER LOGIC (Backend)
@@ -312,20 +494,18 @@ def render_receipt_image(title: str, body_lines: List[str], add_dt: bool = True)
 # ----------------------------------------------------------------------
 def _check_pdflatex():
     try:
-        startupinfo = None
-        creationflags = 0
-        if os.name == 'nt':
-            creationflags = subprocess.CREATE_NO_WINDOW
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-        
-        subprocess.run(["pdflatex", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags, startupinfo=startupinfo)
+        _run_subprocess_logged(["pdflatex", "--version"], timeout=5)
         return True
-    except:
+    except FileNotFoundError:
+        return False
+    except Exception as exc:
+        _log_debug(f"pdflatex check failed: {exc}")
         return shutil.which("pdflatex") is not None
 
-def render_with_pdflatex(latex_code: str) -> Image.Image:
+def render_with_pdflatex(
+    latex_code: str,
+    status_callback: Optional[Callable[[str], None]] = None
+) -> Image.Image:
     try:
         from pdf2image import convert_from_path
     except ImportError:
@@ -382,15 +562,6 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
 
     temp_dir = tempfile.mkdtemp()
     
-    # SETUP FLAGS TO HIDE CONSOLE WINDOWS
-    creationflags = 0
-    startupinfo = None
-    if os.name == 'nt':
-        creationflags = subprocess.CREATE_NO_WINDOW
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = subprocess.SW_HIDE
-
     try:
         tex_file = os.path.join(temp_dir, "ticket.tex")
         pdf_file = os.path.join(temp_dir, "ticket.pdf")
@@ -402,53 +573,59 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
 
         # --- RETRY LOOP FOR AUTO-INSTALL ---
         max_retries = 2
+        compile_timeout = 10
         for attempt in range(max_retries):
             try:
-                subprocess.run(cmd, cwd=temp_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=creationflags, startupinfo=startupinfo)
+                exit_code, stdout, stderr = _run_subprocess_logged(cmd, cwd=temp_dir, timeout=compile_timeout)
+                if exit_code != 0:
+                    raise subprocess.CalledProcessError(exit_code, cmd, output=stdout, stderr=stderr)
                 break # Success!
             except subprocess.CalledProcessError as e:
                 # If this was the last attempt, fail loudly
+                log_content = "No log found."
+                log_path = os.path.join(temp_dir, "ticket.log")
+                if os.path.exists(log_path):
+                    with open(log_path, "r", encoding="utf-8", errors="ignore") as log:
+                        log_content = log.read()
+                _log_error(f"LaTeX Compilation FAILED.\nFull Log:\n{log_content}")
                 if attempt == max_retries - 1:
-                    log_content = "No log found."
-                    try:
-                        log_path = os.path.join(temp_dir, "ticket.log")
-                        if os.path.exists(log_path):
-                            with open(log_path, "r", encoding="utf-8", errors="ignore") as log:
-                                log_content = log.read()
-                    except: pass
-                    
-                    _log_debug(f"LaTeX Compilation FAILED.\nLast Log:\n{log_content[-500:]}")
-                    err_msg = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ""
+                    if isinstance(e.stderr, str):
+                        err_msg = e.stderr
+                    else:
+                        err_msg = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ""
                     raise RuntimeError(f"LaTeX Error (Check logs).\n{log_content[-800:]}\nSTDERR: {err_msg}")
                 
                 # Check for missing package error
-                log_path = os.path.join(temp_dir, "ticket.log")
                 if os.path.exists(log_path):
                     with open(log_path, "r", encoding="utf-8", errors="ignore") as log:
                         log_text = log.read()
                         
-                    # Regex to find missing file/package
-                    match = re.search(r"! LaTeX Error: File `(.+?)\.sty' not found", log_text)
-                    if match:
-                        missing_pkg = match.group(1)
-                        _log_debug(f"Missing package detected: {missing_pkg}. Attempting auto-install...")
+                    missing_pkg, missing_tikz = _parse_missing_dependencies(log_text)
+                    missing_dep = missing_pkg or missing_tikz
+                    if missing_dep:
+                        _log_debug(f"Missing dependency detected: {missing_dep}. Attempting auto-install...")
+                        if status_callback:
+                            status_callback(f"Downloading {missing_dep}...")
                         
                         try:
                             # Try to install package
                             # Note: --admin is safest if MikTeX is shared, but we try both if one fails or just assume admin if running as admin
-                            install_args = ["mpm", "--admin", "--install", missing_pkg]
-                            subprocess.run(install_args, check=True, creationflags=creationflags, startupinfo=startupinfo)
+                            install_args = ["mpm", "--admin", "--install", missing_dep]
+                            _run_subprocess_logged(install_args, timeout=180)
                             
                             # Update FNDB
-                            subprocess.run(["initexmf", "--admin", "--update-fndb"], check=True, creationflags=creationflags, startupinfo=startupinfo)
+                            if status_callback:
+                                status_callback("Configuring MiKTeX Database...")
+                            _run_subprocess_logged(["initexmf", "--admin", "--update-fndb"], timeout=180)
                             
-                            _track_installed_lib(missing_pkg)
-                            _log_debug(f"Installed {missing_pkg}. Retrying compilation...")
+                            _track_installed_lib(missing_dep)
+                            _log_debug(f"Installed {missing_dep}. Retrying compilation...")
+                            compile_timeout = 180
                             continue # Retry the loop
                         except Exception as inst_err:
-                            _log_debug(f"Auto-install failed for {missing_pkg}: {inst_err}")
+                            _log_debug(f"Auto-install failed for {missing_dep}: {inst_err}")
                             # Raise immediately if install fails, no point retrying
-                            raise RuntimeError(f"Failed to auto-install package '{missing_pkg}'.\nError: {inst_err}")
+                            raise RuntimeError(f"Failed to auto-install package '{missing_dep}'.\nError: {inst_err}")
                     else:
                         # Not a missing package error, re-raise
                         raise e
@@ -473,13 +650,18 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-def render_latex_image(latex_code: str, title: str = "", add_dt: bool = False) -> Image.Image:
+def render_latex_image(
+    latex_code: str,
+    title: str = "",
+    add_dt: bool = False,
+    status_callback: Optional[Callable[[str], None]] = None
+) -> Image.Image:
     has_pdf2image = importlib.util.find_spec("pdf2image") is not None
     has_pdflatex = _check_pdflatex()
 
     if has_pdf2image and has_pdflatex:
         try:
-            latex_img = render_with_pdflatex(latex_code)
+            latex_img = render_with_pdflatex(latex_code, status_callback=status_callback)
             w, h = latex_img.size
             max_w = int(PRINT_WIDTH_PX - MARGIN_L - MARGIN_R)
             
@@ -725,6 +907,12 @@ class ModernPrinterApp(ctk.CTk):
             self.show_latex()
         
         self.check_for_updates()
+        self._warmup_manifest_async()
+
+    def _warmup_manifest_async(self):
+        def _task():
+            _warmup_manifest()
+        threading.Thread(target=_task, daemon=True).start()
 
     def _show_setup_warning(self):
         miktex_msg = ""
@@ -861,8 +1049,30 @@ class ModernPrinterApp(ctk.CTk):
         self.frames[frame_key].grid(row=0, column=0, sticky="nsew")
 
     def _update_status(self, msg):
-        self.status_label.configure(text=msg)
-        self.update_idletasks()
+        def _apply():
+            self.status_label.configure(text=msg)
+            self.update_idletasks()
+        if threading.current_thread() is threading.main_thread():
+            _apply()
+        else:
+            self.after(0, _apply)
+
+    def _status_from_worker(self, msg: str):
+        self._update_status(msg)
+
+    def _render_latex_async(self, source: str, title: str, add_dt: bool, on_success, on_error):
+        def _task():
+            try:
+                img = render_latex_image(
+                    source,
+                    title,
+                    add_dt,
+                    status_callback=self._status_from_worker
+                )
+                self.after(0, lambda: on_success(img))
+            except Exception as exc:
+                self.after(0, lambda: on_error(exc))
+        threading.Thread(target=_task, daemon=True).start()
 
     def _bg_task(self, task_func):
         def wrapper():
@@ -1002,33 +1212,39 @@ class ModernPrinterApp(ctk.CTk):
     def do_latex_preview(self):
         self.lbl_latex_preview.configure(image=None, text="Rendering...")
         self.update()
-        try:
-            source = self._current_latex_source()
-            img = render_latex_image(source, self.latex_title.get(), self.latex_dt.get())
+        source = self._current_latex_source()
+
+        def on_success(img):
             self.latest_latex_preview = img
             self.latest_latex_source = source
             self.display_preview(img, self.lbl_latex_preview, max_height=800)
-        except Exception as e:
-            self.lbl_latex_preview.configure(text=f"Error: {e}")
+
+        def on_error(err):
+            self.lbl_latex_preview.configure(text=f"Error: {err}")
+
+        self._render_latex_async(source, self.latex_title.get(), self.latex_dt.get(), on_success, on_error)
 
     def do_latex_print(self):
         code, title, dt = self.latex_input.get("1.0", "end").strip(), self.latex_title.get(), self.latex_dt.get()
-        self._bg_task(lambda: print_master(render_latex_image(code, title, dt), True))
+        self._bg_task(lambda: print_master(render_latex_image(code, title, dt, status_callback=self._status_from_worker), True))
 
     def open_latex_fullscreen_preview(self):
         source = self._current_latex_source()
         if self.latest_latex_preview is None or source != self.latest_latex_source:
             self.lbl_latex_preview.configure(image=None, text="Rendering...")
             self.update()
-            try:
-                img = render_latex_image(source, self.latex_title.get(), self.latex_dt.get())
+            def on_success(img):
                 self.latest_latex_preview = img
                 self.latest_latex_source = source
                 self.display_preview(img, self.lbl_latex_preview, max_height=800)
-            except Exception as e:
-                self.lbl_latex_preview.configure(text=f"Error: {e}")
-                messagebox.showerror("Preview Error", f"Failed to render preview.\n{e}")
-                return
+                self._open_image_fullscreen(self.latest_latex_preview)
+
+            def on_error(err):
+                self.lbl_latex_preview.configure(text=f"Error: {err}")
+                messagebox.showerror("Preview Error", f"Failed to render preview.\n{err}")
+
+            self._render_latex_async(source, self.latex_title.get(), self.latex_dt.get(), on_success, on_error)
+            return
         self._open_image_fullscreen(self.latest_latex_preview)
 
     def _current_latex_source(self) -> str:
@@ -1209,5 +1425,6 @@ class ModernPrinterApp(ctk.CTk):
 
 if __name__ == "__main__":
     ensure_admin_on_first_run()
-    app = ModernPrinterApp()
-    app.mainloop()
+    if ensure_base_dir_writable():
+        app = ModernPrinterApp()
+        app.mainloop()
