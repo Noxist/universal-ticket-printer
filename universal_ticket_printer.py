@@ -35,7 +35,7 @@ except ImportError:
 # GLOBAL PATH & SETTINGS MANAGEMENT
 # ----------------------------------------------------------------------
 
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 UPDATE_URL_VERSION = "https://raw.githubusercontent.com/noxist/universal-ticket-printer/main/version.txt"
 UPDATE_URL_LINK = "https://github.com/noxist/universal-ticket-printer/releases"
 UPDATE_URL_API = "https://api.github.com/repos/noxist/universal-ticket-printer/releases/latest"
@@ -307,6 +307,7 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
         if not ("\\begin{tikzpicture}" in content or "$$" in content or "\\[" in content):
              content = f"\\[ {content} \\]"
     
+    # --- FIXED TEMPLATE WITH TCOLORBOX AND WAVE STYLE ---
     tex_template = r"""
 \documentclass[11pt]{article}
 \usepackage[utf8]{inputenc}
@@ -332,8 +333,13 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
 \usepackage{xcolor}      
 \usepackage{booktabs}    
 \usepackage{tabularx}    
-\usepackage{eurosym}     
+\usepackage{eurosym}
+\usepackage[most]{tcolorbox}
 \usetikzlibrary{patterns,decorations.pathmorphing,decorations.markings,calc}
+
+%% Custom Definitions for Printer
+\tikzset{wave/.style={decorate, decoration={snake, amplitude=2pt, segment length=5pt, post length=2pt}}}
+
 \pgfplotsset{compat=1.18}
 \geometry{paperwidth=80mm, paperheight=2000mm, left=2mm, right=2mm, top=2mm, bottom=2mm}
 \renewcommand{\familydefault}{\sfdefault}
@@ -371,7 +377,9 @@ def render_with_pdflatex(latex_code: str) -> Image.Image:
                     with open(log_path, "r", encoding="utf-8", errors="ignore") as log:
                         log_content = log.read()
             except: pass
-            raise RuntimeError(f"LaTeX Error. Check syntax.\n{log_content[-500:]}")
+            # Try to grab stderr if available
+            err_msg = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ""
+            raise RuntimeError(f"LaTeX Error.\n{log_content[-800:]}\nSTDERR: {err_msg}")
         except FileNotFoundError:
              raise RuntimeError("LaTeX (pdflatex) not found. Please install MiKTeX or TeX Live.")
 
@@ -430,7 +438,7 @@ def render_latex_image(latex_code: str, title: str = "", add_dt: bool = False) -
             print(f"Latex Error: {e}")
             import traceback
             traceback.print_exc()
-            return render_receipt_image("LaTeX Error", [str(e)[:300]], False)
+            return render_receipt_image("LaTeX Error", [str(e)[:400]], False)
 
     return render_matplotlib_fallback(latex_code, title, add_dt)
 
