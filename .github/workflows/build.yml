@@ -2,6 +2,8 @@ name: Build & Release Setup.exe
 
 on:
   push:
+    branches:
+      - '**'
     tags:
       - 'v*' # Starts only when you push a tag like v1.0.0
   workflow_dispatch: # Allows manual start for testing
@@ -24,6 +26,27 @@ jobs:
       run: |
         pip install -r requirements.txt
         pip install pyinstaller auto-py-to-exe customtkinter packaging paho-mqtt Pillow requests pdf2image
+
+    - name: Set build variables
+      shell: powershell
+      run: |
+        $refType = "${{ github.ref_type }}"
+        $refName = "${{ github.ref_name }}"
+        $safeRef = $refName -replace '[^A-Za-z0-9._-]', '-'
+        if ($refType -eq "tag") {
+          $outputName = "TicketPrinter_Setup"
+          $appVersion = $refName -replace "^v",""
+          $channel = "release"
+        } else {
+          $shortSha = "${{ github.sha }}".Substring(0, 7)
+          $outputName = "TicketPrinter_Preview_$safeRef"
+          $appVersion = "0.0.0-preview-$shortSha"
+          $channel = "preview"
+        }
+        "OUTPUT_NAME=$outputName" >> $env:GITHUB_ENV
+        "APP_VERSION=$appVersion" >> $env:GITHUB_ENV
+        "BUILD_CHANNEL=$channel" >> $env:GITHUB_ENV
+        "SAFE_REF=$safeRef" >> $env:GITHUB_ENV
 
     # ROBUST Poppler Download
     - name: Download Poppler
@@ -60,16 +83,13 @@ jobs:
     - name: Generate Inno Setup Script
       shell: powershell
       run: |
-        $version = "${{ github.ref_name }}" -replace "v",""
-        if ($version -eq "main") { $version = "1.0.0" } 
-        
         $issContent = @"
         [Setup]
         AppName=Universal Ticket Printer
-        AppVersion=$version
+        AppVersion=$env:APP_VERSION
         DefaultDirName={autopf}\TicketPrinter
         DefaultGroupName=TicketPrinter
-        OutputBaseFilename=TicketPrinter_Setup
+        OutputBaseFilename=$env:OUTPUT_NAME
         Compression=lzma
         SolidCompression=yes
         ArchitecturesInstallIn64BitMode=x64
@@ -77,6 +97,7 @@ jobs:
 
         [Tasks]
         Name: "desktopicon"; Description: "Create a desktop icon"; GroupDescription: "Additional icons:"; Flags: unchecked
+        Name: "miktex"; Description: "Open MiKTeX download page"; GroupDescription: "Additional tools:"; Flags: unchecked
 
         [Files]
         Source: "dist\TicketPrinter.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -89,6 +110,7 @@ jobs:
 
         [Run]
         Filename: "{app}\TicketPrinter.exe"; Description: "Launch program"; Flags: nowait postinstall skipifsilent
+        Filename: "https://miktex.org/download"; Description: "Get MiKTeX (LaTeX support)"; Flags: shellexec postinstall skipifsilent unchecked; Tasks: miktex
         "@
         
         # Writes the file explicitly as UTF8 with BOM for Inno Setup
@@ -104,3 +126,10 @@ jobs:
         files: Output/TicketPrinter_Setup.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Upload preview artifact
+      uses: actions/upload-artifact@v4
+      if: env.BUILD_CHANNEL == 'preview'
+      with:
+        name: ${{ env.OUTPUT_NAME }}
+        path: Output/${{ env.OUTPUT_NAME }}.exe
