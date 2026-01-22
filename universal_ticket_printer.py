@@ -78,13 +78,27 @@ LOG_QUEUE: "queue.Queue[logging.LogRecord]" = queue.Queue()
 LOGGER = logging.getLogger("ticket_printer")
 MIKTEX_LOCK = threading.Lock()
 
+def _write_log_safe(message: str) -> None:
+    for attempt in range(3):
+        try:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(message)
+            return
+        except PermissionError:
+            if attempt < 2:
+                time.sleep(0.1)
+                continue
+    print(message, end="")
+
+class SafeFileHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = self.format(record)
+        _write_log_safe(f"{msg}\n")
+
 def _setup_logging() -> logging.handlers.QueueListener:
     LOGGER.setLevel(logging.DEBUG)
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    try:
-        file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
-    except Exception:
-        file_handler = logging.StreamHandler()
+    file_handler = SafeFileHandler()
     file_handler.setFormatter(formatter)
     queue_handler = logging.handlers.QueueHandler(LOG_QUEUE)
     LOGGER.addHandler(queue_handler)
@@ -403,6 +417,7 @@ def ensure_base_dir_writable():
 
 PRINTER_PORT = 9100
 LAN_TIMEOUT = 2.0
+MQTT_SOCKET_TIMEOUT = 10
 PRINT_WIDTH_PX = 576
 MARGIN_T, MARGIN_B, MARGIN_L, MARGIN_R = 28, 40, 18, 18
 LINE_HEIGHT_MULT = 1.15
@@ -632,7 +647,10 @@ def render_with_pdflatex(
                     if missing_dep:
                         _log_debug(f"Missing dependency detected: {missing_dep}. Attempting auto-install...")
                         if status_callback:
-                            status_callback(f"Downloading {missing_dep}...")
+                            if missing_pkg:
+                                status_callback(f"Status: Downloading LaTeX package: {missing_pkg}...")
+                            else:
+                                status_callback(f"Status: Installing Library: {missing_tikz}...")
                         
                         try:
                             # Try to install package
@@ -692,6 +710,8 @@ def render_latex_image(
 
     if has_pdf2image and has_pdflatex:
         try:
+            if status_callback:
+                status_callback("Status: Rendering LaTeX...")
             latex_img = render_with_pdflatex(latex_code, status_callback=status_callback)
             w, h = latex_img.size
             max_w = int(PRINT_WIDTH_PX - MARGIN_L - MARGIN_R)
@@ -720,6 +740,8 @@ def render_latex_image(
                 
             x_pos = int((PRINT_WIDTH_PX - latex_img.size[0]) // 2)
             final_img.paste(latex_img, (x_pos, current_y))
+            if status_callback:
+                status_callback("Status: Ready")
             return final_img
             
         except Exception as e:
@@ -788,7 +810,11 @@ def send_lan_image(img: Image.Image, cut: bool = True) -> bool:
     except OSError:
         return False
 
-def send_mqtt_image(img: Image.Image, cut: bool = True) -> bool:
+def send_mqtt_image(
+    img: Image.Image,
+    cut: bool = True,
+    status_callback: Optional[Callable[[str], None]] = None
+) -> bool:
     host = APP_SETTINGS.get("mqtt_host", "")
     if not host: return False
     
@@ -811,7 +837,14 @@ def send_mqtt_image(img: Image.Image, cut: bool = True) -> bool:
         client.username_pw_set(user, pw)
         
     try:
-        client.connect(host, APP_SETTINGS.get("mqtt_port", 8883), keepalive=30)
+        if status_callback:
+            status_callback("Status: Connecting to Cloud...")
+        prev_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(MQTT_SOCKET_TIMEOUT)
+        try:
+            client.connect(host, APP_SETTINGS.get("mqtt_port", 8883), keepalive=10)
+        finally:
+            socket.setdefaulttimeout(prev_timeout)
         payload = {
             "ticket_id": f"desk-{int(datetime.now().timestamp())}",
             "data_type": "png",
@@ -823,12 +856,14 @@ def send_mqtt_image(img: Image.Image, cut: bool = True) -> bool:
         client.publish(topic, json.dumps(payload), qos=2)
         client.loop(timeout=2.0)
         client.disconnect()
+        if status_callback:
+            status_callback("Status: Ready")
         return True
     except Exception as e:
         _log_debug(f"MQTT Error: {e}")
         return False
 
-def send_manual_cut() -> bool:
+def send_manual_cut(status_callback: Optional[Callable[[str], None]] = None) -> bool:
     if send_lan_image(Image.new("1", (1,1)), cut=True): 
         return True
     host = APP_SETTINGS.get("mqtt_host", "")
@@ -843,20 +878,36 @@ def send_manual_cut() -> bool:
         pw = APP_SETTINGS.get("mqtt_pass", "")
         if user: client.username_pw_set(user, pw)
             
-        client.connect(host, APP_SETTINGS.get("mqtt_port", 8883), keepalive=30)
+        if status_callback:
+            status_callback("Status: Connecting to Cloud...")
+        prev_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(MQTT_SOCKET_TIMEOUT)
+        try:
+            client.connect(host, APP_SETTINGS.get("mqtt_port", 8883), keepalive=10)
+        finally:
+            socket.setdefaulttimeout(prev_timeout)
         payload = {"ticket_id": "cut-only", "data_type": "cmd", "cut_paper": 1}
         topic = APP_SETTINGS.get("mqtt_topic", "Prn20B1B50C2199")
         client.publish(topic, json.dumps(payload), qos=2)
         client.loop(timeout=2.0)
         client.disconnect()
+        if status_callback:
+            status_callback("Status: Ready")
         return True
     except: return False
 
-def print_master(img: Image.Image, cut: bool = True) -> str:
+def print_master(
+    img: Image.Image,
+    cut: bool = True,
+    status_callback: Optional[Callable[[str], None]] = None
+) -> str:
     res_lan = send_lan_image(img, cut)
-    if res_lan: return "OK (LAN)"
+    if res_lan:
+        if status_callback:
+            status_callback("Status: Ready")
+        return "OK (LAN)"
     
-    res_mqtt = send_mqtt_image(img, cut)
+    res_mqtt = send_mqtt_image(img, cut, status_callback=status_callback)
     if res_mqtt: return "OK (Cloud)"
     
     return "Failed (Check Settings)"
@@ -1092,6 +1143,7 @@ class ModernPrinterApp(ctk.CTk):
         self._update_status(msg)
 
     def _render_latex_async(self, source: str, title: str, add_dt: bool, on_success, on_error):
+        self._update_status("Status: Rendering LaTeX...")
         def _task():
             try:
                 img = render_latex_image(
@@ -1117,7 +1169,7 @@ class ModernPrinterApp(ctk.CTk):
         threading.Thread(target=wrapper, daemon=True).start()
 
     def do_manual_cut(self):
-        self._bg_task(lambda: "Cut: OK" if send_manual_cut() else "Cut: Error")
+        self._bg_task(lambda: "Cut: OK" if send_manual_cut(status_callback=self._status_from_worker) else "Cut: Error")
 
     def _init_bulk_frame(self):
         f = ctk.CTkFrame(self.main_container, fg_color="transparent")
@@ -1154,7 +1206,7 @@ class ModernPrinterApp(ctk.CTk):
                     img = render_receipt_image(t.strip(), [b.strip()], use_dt)
                 else:
                     img = render_receipt_image(ln.strip(), [""], use_dt)
-                if "OK" in print_master(img, cut=do_cut): count += 1
+                if "OK" in print_master(img, cut=do_cut, status_callback=self._status_from_worker): count += 1
             return f"Bulk: {count}/{len(lines)} printed"
         self._bg_task(task)
 
@@ -1187,7 +1239,7 @@ class ModernPrinterApp(ctk.CTk):
 
     def do_tpl_print(self):
         img = render_receipt_image(self.tpl_title.get(), self.tpl_body.get("1.0", "end").strip().splitlines(), self.tpl_dt.get())
-        self._bg_task(lambda: print_master(img, True))
+        self._bg_task(lambda: print_master(img, True, status_callback=self._status_from_worker))
 
     def _init_raw_frame(self):
         f = ctk.CTkFrame(self.main_container, fg_color="transparent")
@@ -1205,7 +1257,7 @@ class ModernPrinterApp(ctk.CTk):
 
     def do_raw_print(self):
         img = render_receipt_image("", self.raw_txt.get("1.0", "end").strip().splitlines(), self.raw_dt.get())
-        self._bg_task(lambda: print_master(img, True))
+        self._bg_task(lambda: print_master(img, True, status_callback=self._status_from_worker))
 
     def _init_latex_frame(self):
         f = ctk.CTkFrame(self.main_container, fg_color="transparent")
@@ -1257,7 +1309,7 @@ class ModernPrinterApp(ctk.CTk):
 
     def do_latex_print(self):
         code, title, dt = self.latex_input.get("1.0", "end").strip(), self.latex_title.get(), self.latex_dt.get()
-        self._bg_task(lambda: print_master(render_latex_image(code, title, dt, status_callback=self._status_from_worker), True))
+        self._bg_task(lambda: print_master(render_latex_image(code, title, dt, status_callback=self._status_from_worker), True, status_callback=self._status_from_worker))
 
     def open_latex_fullscreen_preview(self):
         source = self._current_latex_source()
@@ -1376,7 +1428,7 @@ class ModernPrinterApp(ctk.CTk):
             count = 0
             for p in imgs:
                 try:
-                    if "OK" in print_master(render_composed_image(Image.open(p)), True): count += 1
+                    if "OK" in print_master(render_composed_image(Image.open(p)), True, status_callback=self._status_from_worker): count += 1
                 except: pass
             return f"{count} images printed"
         self._bg_task(task)
